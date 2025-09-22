@@ -419,35 +419,31 @@ void writeFuseIni(const std::string& outputPath, const char* data = nullptr) {
     // Use stdio.h functions for file operations
     FILE* outFile = fopen(outputPath.c_str(), "w");
     if (outFile) {
-        // Write the header message and section name
-        // Uncomment this line if needed to include the commented warning line
-        // fwrite("; do not adjust these values manually unless they were not dumped correctly\n", 1, 81, outFile);
+        // Write the header in one call instead of three separate fwrite calls
+        fputs("[", outFile);
+        fputs(FUSE_STR.c_str(), outFile); 
+        fputs("]\n", outFile);
         
-        fwrite("[", 1, 1, outFile);
-        fwrite(FUSE_STR.c_str(), 1, FUSE_STR.size(), outFile);
-        fwrite("]\n", 1, 2, outFile);
-
         if (data) {
-            // Write each key-value pair with `fprintf`
+            // fprintf is necessary here for actual formatting - keep these
             fprintf(outFile, "cpu_speedo_0=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_CPU_SPEEDO_0_CALIB));
             fprintf(outFile, "cpu_speedo_2=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_CPU_SPEEDO_2_CALIB));
             fprintf(outFile, "soc_speedo_0=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_SOC_SPEEDO_0_CALIB));
             fprintf(outFile, "cpu_iddq=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_CPU_IDDQ_CALIB));
             fprintf(outFile, "soc_iddq=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_SOC_IDDQ_CALIB));
             fprintf(outFile, "gpu_iddq=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_GPU_IDDQ_CALIB));
-            fprintf(outFile, "disable_reload=false\n");
-        } else {
-            // Write empty values if `data` is not provided
-            fputs("cpu_speedo_0=\n", outFile);
-            fputs("cpu_speedo_2=\n", outFile);
-            fputs("soc_speedo_0=\n", outFile);
-            fputs("cpu_iddq=\n", outFile);
-            fputs("soc_iddq=\n", outFile);
-            fputs("gpu_iddq=\n", outFile);
             fputs("disable_reload=false\n", outFile);
+        } else {
+            // Single fputs call instead of seven separate ones
+            fputs("cpu_speedo_0=\n"
+                  "cpu_speedo_2=\n"
+                  "soc_speedo_0=\n"
+                  "cpu_iddq=\n"
+                  "soc_iddq=\n"
+                  "gpu_iddq=\n"
+                  "disable_reload=false\n", outFile);
         }
-
-        fclose(outFile); // Close the file
+        fclose(outFile);
     }
 #else
     // Use fstream for file operations
@@ -542,7 +538,8 @@ std::string getLocalIpAddress() {
     Result rc;
     u32 ipAddress;
 
-    
+    ASSERT_FATAL(nifmInitialize(NifmServiceType_User)); // for local IP
+
     // Get the current IP address
     rc = nifmGetCurrentIpAddress(&ipAddress);
     if (R_SUCCEEDED(rc)) {
@@ -923,8 +920,8 @@ void initializeTheme(const std::string& themeIniPath = THEME_CONFIG_INI_PATH) {
     bool needsUpdate = false;
     
     // Check if file exists and has theme section
-    bool fileExists = isFileOrDirectory(themeIniPath);
-    bool hasThemeSection = fileExists && (themeData.count(THEME_STR) > 0);
+    //const bool fileExists = isFileOrDirectory(themeIniPath);
+    const bool hasThemeSection = isFileOrDirectory(themeIniPath) && (themeData.count(THEME_STR) > 0);
     
     if (hasThemeSection) {
         // File exists with theme section - check for missing keys
@@ -1309,78 +1306,89 @@ void addGap(tsl::elm::List* list, s32 gapHeight) {
     ), gapHeight);
 }
 
-std::vector<std::string> wrapText(const std::string& text, float maxWidth, const std::string& wrappingMode, bool useIndent, const std::string& indent, float indentWidth, size_t fontSize) {
+std::vector<std::string> wrapText(
+    const std::string& text,
+    float maxWidth,
+    const std::string& wrappingMode,
+    bool useIndent,
+    const std::string& indent,
+    float indentWidth,
+    size_t fontSize
+) {
     if (wrappingMode == "none" || (wrappingMode != "char" && wrappingMode != "word")) {
-        return std::vector<std::string>{text};  // Return the entire text as a single line
+        return { text };
     }
-    
-    std::vector<std::string> wrappedLines;
-    bool firstLine = true;
 
-    float currentMaxWidth;
-    std::string testLine;
+    std::vector<std::string> wrappedLines;
+
+    bool firstLine = true;
+    std::string currentLine;
 
     if (wrappingMode == "char") {
-        std::string currentLine;
-        
-        size_t i = 0;
-        while (i < text.size()) {
-            // OPTIMIZED: Create test line fresh each iteration
-            testLine = currentLine + text[i];
-            currentMaxWidth = firstLine ? maxWidth : maxWidth - indentWidth;
-            
-            if (tsl::gfx::calculateStringWidth(testLine, fontSize, false) > currentMaxWidth) {
-                // Line would be too long, finish current line
-                wrappedLines.push_back(((firstLine && useIndent) || !useIndent) ? currentLine : indent + currentLine);
-                
-                // OPTIMIZED: Start fresh line instead of clearing
-                currentLine = std::string(1, text[i]);  // New line with current character
-                firstLine = false;
-            } else {
-                currentLine = std::move(testLine);  // Use the test line
-            }
-            i++;
-        }
-        if (!currentLine.empty()) {
-            wrappedLines.push_back(((firstLine && useIndent) || !useIndent) ? currentLine : indent + currentLine);
-        }
-    } else if (wrappingMode == "word") {
-        std::string currentLine;
-        std::string currentWord;  // Safe reuse - standard stream extraction pattern
-        
-        StringStream stream(text);
-        while (stream >> currentWord) {
-            currentMaxWidth = firstLine ? maxWidth : maxWidth - indentWidth;
-            
-            // OPTIMIZED: Create test line fresh each iteration
-            testLine = currentLine;
-            if (!testLine.empty()) {
-                testLine += " ";
-            }
-            testLine += currentWord;
-            
-            if (tsl::gfx::calculateStringWidth(testLine, fontSize, false) > currentMaxWidth) {
-                // Line would be too long, finish current line
+        for (char c : text) {
+            const float currentMaxWidth = firstLine ? maxWidth : maxWidth - indentWidth;
+
+            currentLine.push_back(c);
+            if (tsl::gfx::calculateStringWidth(currentLine, fontSize, false) > currentMaxWidth) {
+                // Remove last character and push line
+                const char lastChar = currentLine.back();
+                currentLine.pop_back();
                 if (!currentLine.empty()) {
-                    wrappedLines.push_back(((firstLine && useIndent) || !useIndent) ? currentLine : indent + currentLine);
+                    if (useIndent && !firstLine)
+                        wrappedLines.push_back(indent + currentLine);
+                    else
+                        wrappedLines.push_back(currentLine);
                 }
-                
-                // OPTIMIZED: Start fresh line instead of clearing
-                currentLine = currentWord;  // New line with current word
+                currentLine = lastChar;
                 firstLine = false;
-            } else {
-                currentLine = std::move(testLine);  // Use the test line
             }
         }
+
         if (!currentLine.empty()) {
-            wrappedLines.push_back(((firstLine && useIndent) || !useIndent) ? currentLine : indent + currentLine);
+            if (useIndent && !firstLine)
+                wrappedLines.push_back(indent + currentLine);
+            else
+                wrappedLines.push_back(currentLine);
+        }
+    } 
+    else {
+        // Word wrapping
+        StringStream stream(text);
+        std::string currentWord;
+
+        std::string testLine;
+
+        while (stream >> currentWord) {
+            const float currentMaxWidth = firstLine ? maxWidth : maxWidth - indentWidth;
+
+            testLine = currentLine;
+            if (!testLine.empty()) testLine.push_back(' ');
+            testLine += currentWord;
+
+            if (tsl::gfx::calculateStringWidth(testLine, fontSize, false) > currentMaxWidth) {
+                if (!currentLine.empty()) {
+                    if (useIndent && !firstLine)
+                        wrappedLines.push_back(indent + currentLine);
+                    else
+                        wrappedLines.push_back(currentLine);
+                }
+                currentLine = std::move(currentWord);
+                firstLine = false;
+            } else {
+                currentLine.swap(testLine);
+            }
+        }
+
+        if (!currentLine.empty()) {
+            if (useIndent && !firstLine)
+                wrappedLines.push_back(indent + currentLine);
+            else
+                wrappedLines.push_back(currentLine);
         }
     }
-    
+
     return wrappedLines;
 }
-
-
 
 // ─── Helper: flatten + placeholder + wrap & expand ─────────────────────────────
 static bool buildTableDrawerLines(
@@ -3854,7 +3862,7 @@ void handleMirrorCommand(const std::vector<std::string>& cmd, const std::string&
         // Process files one by one, freeing memory as we go
         for (size_t i = 0; i < fileList.size(); ++i) {
             // Move the string to avoid copy
-            auto sourceDirectory = std::move(fileList[i]);
+            const auto sourceDirectory = std::move(fileList[i]);
             fileList[i].shrink_to_fit();     // Free the capacity
             mirrorFiles(sourceDirectory, destinationPath, operation);
             
@@ -3870,20 +3878,7 @@ void handleMoveCommand(const std::vector<std::string>& cmd, const std::string& p
     parseCommandArguments(cmd, packagePath, sourceListPath, destinationListPath, logSource, logDestination, sourcePath, destinationPath, copyFilterListPath, filterListPath);
     
     if (!sourceListPath.empty() && !destinationListPath.empty()) {
-        // Process list-based moving
-        auto sourceFilesList = readListFromFile(sourceListPath);
-        auto destinationFilesList = readListFromFile(destinationListPath);
-        
-        // Early validation of list sizes
-        if (sourceFilesList.size() != destinationFilesList.size()) {
-            #if USING_LOGGING_DIRECTIVE
-            if (!disableLogging)
-                logMessage("Source and destination lists must have the same number of entries.");
-            #endif
-            return;
-        }
-        
-        // Only create filter sets if filter files exist
+        // Load filter sets (these are typically small)
         std::unique_ptr<std::unordered_set<std::string>> copyFilterSet;
         if (!copyFilterListPath.empty()) {
             copyFilterSet = std::make_unique<std::unordered_set<std::string>>(readSetFromFile(copyFilterListPath));
@@ -3893,24 +3888,74 @@ void handleMoveCommand(const std::vector<std::string>& cmd, const std::string& p
         if (!filterListPath.empty()) {
             filterSet = std::make_unique<std::unordered_set<std::string>>(readSetFromFile(filterListPath));
         }
+    
+        // Pre-allocate strings to avoid reallocations in loop
+        //sourcePath.reserve(1024);
+        //destinationPath.reserve(1024);
+    
+        // Stream process both files line by line
+    #if !USING_FSTREAM_DIRECTIVE
+        FILE* sourceFile = fopen(sourceListPath.c_str(), "r");
+        FILE* destFile = fopen(destinationListPath.c_str(), "r");
         
-        const size_t listSize = sourceFilesList.size(); // Both lists are same size now
-        for (size_t i = 0; i < listSize; ++i) {
-            // Move strings to avoid copies
-            sourcePath = std::move(sourceFilesList[i]);
-            sourceFilesList[i].shrink_to_fit();     // Free the capacity
-            preprocessPath(sourcePath, packagePath);
+        if (!sourceFile || !destFile) {
+            if (sourceFile) fclose(sourceFile);
+            if (destFile) fclose(destFile);
+            #if USING_LOGGING_DIRECTIVE
+            if (!disableLogging)
+                logMessage("Failed to open source or destination list files");
+            #endif
+            return;
+        }
+        
+        // Set larger buffers for better I/O performance
+        static constexpr size_t FILE_BUFFER_SIZE = 8192;
+        setvbuf(sourceFile, nullptr, _IOFBF, FILE_BUFFER_SIZE);
+        setvbuf(destFile, nullptr, _IOFBF, FILE_BUFFER_SIZE);
+        
+        static constexpr size_t BUFFER_SIZE = 8192;
+        char sourceBuffer[BUFFER_SIZE];
+        char destBuffer[BUFFER_SIZE];
+        
+        // Static string for repeated log messages to reduce allocations
+        #if USING_LOGGING_DIRECTIVE
+        static const std::string skipDirMsg = "Skipping non-empty directory: ";
+        #endif
+        
+        // Process files line by line simultaneously
+        while (fgets(sourceBuffer, BUFFER_SIZE, sourceFile) && 
+               fgets(destBuffer, BUFFER_SIZE, destFile)) {
             
-            destinationPath = std::move(destinationFilesList[i]);
-            destinationFilesList[i].shrink_to_fit();     // Free the capacity
+            // Optimized newline removal - scan once instead of using strlen
+            char* srcEnd = sourceBuffer;
+            while (*srcEnd && *srcEnd != '\n') ++srcEnd;
+            const size_t sourceLen = srcEnd - sourceBuffer;
+            *srcEnd = '\0';
+            
+            char* destEnd = destBuffer;
+            while (*destEnd && *destEnd != '\n') ++destEnd;
+            const size_t destLen = destEnd - destBuffer;
+            *destEnd = '\0';
+            
+            // Clear and append to reuse existing string capacity
+            sourcePath.clear();
+            sourcePath.append(sourceBuffer, sourceLen);
+            
+            destinationPath.clear();
+            destinationPath.append(destBuffer, destLen);
+            
+            preprocessPath(sourcePath, packagePath);
             preprocessPath(destinationPath, packagePath);
             
-            // Only check filter if it exists
+            // Cache filter lookup result
             const bool shouldProcess = !filterSet || filterSet->find(sourcePath) == filterSet->end();
             
             if (shouldProcess) {
-                if (sourcePath.back() != '/') {
-                    // It's a file - apply copy filter
+                // Check if it's a directory using the buffer directly (avoid string access)
+                const bool isDirectory = sourceLen > 0 && sourcePath[sourceLen - 1] == '/';
+                
+                if (!isDirectory) {
+                    // Check copy filter once and cache result
                     const bool shouldCopy = copyFilterSet && copyFilterSet->find(sourcePath) != copyFilterSet->end();
                     
                     if (shouldCopy) {
@@ -3921,7 +3966,71 @@ void handleMoveCommand(const std::vector<std::string>& cmd, const std::string& p
                         moveFileOrDirectory(sourcePath, destinationPath, logSource, logDestination);
                     }
                 } else {
-                    // It's a directory - only move if empty
+                    if (isDirectoryEmpty(sourcePath)) {
+                        moveFileOrDirectory(sourcePath, destinationPath, logSource, logDestination);
+                    }
+                    #if USING_LOGGING_DIRECTIVE
+                    else if (!disableLogging) {
+                        logMessage(skipDirMsg + sourcePath);
+                    }
+                    #endif
+                }
+            }
+            
+            // Periodically shrink strings if they've grown too large
+            // This prevents unbounded memory growth for very long paths
+            if (sourcePath.capacity() > 8192) {
+                sourcePath.shrink_to_fit();
+            }
+            if (destinationPath.capacity() > 8192) {
+                destinationPath.shrink_to_fit();
+            }
+        }
+        
+        fclose(sourceFile);
+        fclose(destFile);
+        
+    #else
+        std::ifstream sourceFile(sourceListPath);
+        std::ifstream destFile(destinationListPath);
+        
+        if (!sourceFile.is_open() || !destFile.is_open()) {
+            #if USING_LOGGING_DIRECTIVE
+            if (!disableLogging)
+                logMessage("Failed to open source or destination list files");
+            #endif
+            return;
+        }
+        
+        // Set larger buffers for better I/O performance
+        static char sourceFileBuffer[8192], destFileBuffer[8192];
+        sourceFile.rdbuf()->pubsetbuf(sourceFileBuffer, sizeof(sourceFileBuffer));
+        destFile.rdbuf()->pubsetbuf(destFileBuffer, sizeof(destFileBuffer));
+        
+        // Process files line by line simultaneously
+        while (std::getline(sourceFile, sourcePath) && std::getline(destFile, destinationPath)) {
+            preprocessPath(sourcePath, packagePath);
+            preprocessPath(destinationPath, packagePath);
+            
+            // Cache filter lookup result  
+            const bool shouldProcess = !filterSet || filterSet->find(sourcePath) == filterSet->end();
+            
+            if (shouldProcess) {
+                // Check if it's a directory (ends with /)
+                const bool isDirectory = !sourcePath.empty() && sourcePath.back() == '/';
+                
+                if (!isDirectory) {
+                    // Check copy filter once and cache result
+                    const bool shouldCopy = copyFilterSet && copyFilterSet->find(sourcePath) != copyFilterSet->end();
+                    
+                    if (shouldCopy) {
+                        const long long totalSize = getTotalSize(sourcePath);
+                        long long totalBytesCopied = 0;
+                        copyFileOrDirectory(sourcePath, destinationPath, &totalBytesCopied, totalSize);
+                    } else {
+                        moveFileOrDirectory(sourcePath, destinationPath, logSource, logDestination);
+                    }
+                } else {
                     if (isDirectoryEmpty(sourcePath)) {
                         moveFileOrDirectory(sourcePath, destinationPath, logSource, logDestination);
                     }
@@ -3932,11 +4041,9 @@ void handleMoveCommand(const std::vector<std::string>& cmd, const std::string& p
                     #endif
                 }
             }
-            
-            // Clear the vector elements immediately to free memory
-            //sourceFilesList[i].clear();
-            //destinationFilesList[i].clear();
         }
+    #endif
+    
         
     } else {
         // Single file/directory moving - early returns for error conditions
