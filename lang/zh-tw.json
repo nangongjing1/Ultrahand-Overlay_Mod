@@ -22,7 +22,7 @@
     "PACKAGES": "插件包列表",
     "PACKAGE": "插件包",
     "HIDDEN_PACKAGES": "已隱藏插件包",
-    "HIDDEN": "已隱藏",
+    "HIDDEN": "隱藏條目",
     "HIDE_OVERLAY": "隱藏插件",
     "HIDE_PACKAGE": "隱藏插件包",
     "LAUNCH_ARGUMENTS": "開發者模式",
