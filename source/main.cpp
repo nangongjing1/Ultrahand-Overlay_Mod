@@ -174,7 +174,7 @@ static void switchTencentVerToGlobalVer() {
     std::string cfgFilePath;
 
     bool force_switch = false;
-    cfgFilePath = std::string("sdmc:/config/") + APPTITLE + "/" + "force_swtich.flag";
+    cfgFilePath = std::string("sdmc:/config/") + "Ultrahand" + "/" + "force_swtich.flag";
     if (std::filesystem::exists(cfgFilePath))
         force_switch = true;
 
@@ -203,7 +203,7 @@ static void switchTencentVerToGlobalVer() {
         }
 
         bool is_do_for_ofw = false;
-        cfgFilePath = std::string("sdmc:/config/") + APPTITLE + "/" + "enable_for_ofw.flag";
+        cfgFilePath = std::string("sdmc:/config/") + "Ultrahand" + "/" + "enable_for_ofw.flag";
         if (std::filesystem::exists(cfgFilePath))
             is_do_for_ofw = true;
         if (!is_emummc && !is_do_for_ofw) {
@@ -225,7 +225,7 @@ static void switchTencentVerToGlobalVer() {
     setsysExit();
     if (R_FAILED(rc))
         fatalThrow(MAKERESULT(Module_HomebrewLoader, R_DESCRIPTION(rc)));
-}
+}   //国行自动转区
 
 
 template<typename Map, typename Func = std::function<std::string(const std::string&)>, typename... Args>
