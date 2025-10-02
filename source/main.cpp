@@ -4962,6 +4962,7 @@ bool drawCommandsMenu(
                             if (((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK)))) {
                                 isDownloadCommand.store(false, release);
                                 runningInterpreter.store(true, release);
+                                //logMessage("selectedItem: "+selectedItem+" keyName: "+keyName);
                                 executeInterpreterCommands(getSourceReplacement(commands, selectedItem, i, packagePath), packagePath, keyName);
                                 //startInterpreterThread(packagePath);
                                 listItem->disableClickAnimation();
@@ -4971,7 +4972,7 @@ bool drawCommandsMenu(
                                 lastSelectedListItem = listItem;
                                 shiftItemFocus(listItem);
                                 lastCommandMode = commandMode;
-                                lastKeyName = selectedItem;
+                                lastKeyName = keyName;
 
                                 lastRunningInterpreter.store(true, std::memory_order_release);
                                 if (lastSelectedListItem)
@@ -5036,6 +5037,7 @@ bool drawCommandsMenu(
                             if (usingProgress)
                                 toggleListItem->setValue(INPROGRESS_SYMBOL);
                             nextToggleState = !state ? CAPITAL_OFF_STR : CAPITAL_ON_STR;
+                            lastKeyName = keyName;
                             runningInterpreter.store(true, release);
                             lastRunningInterpreter.store(true, release);
                             lastSelectedListItem = toggleListItem;
@@ -5355,17 +5357,22 @@ public:
                     if (nextToggleState.empty()) {
                         lastSelectedListItem->setValue(success ? CHECKMARK_SYMBOL : CROSSMARK_SYMBOL);
                     } else {
+                        // Determine the final state to save
+                        std::string finalState = success 
+                            ? nextToggleState 
+                            : (nextToggleState == CAPITAL_ON_STR ? CAPITAL_OFF_STR : CAPITAL_ON_STR);
+                        
                         // Update displayed value
-                        lastSelectedListItem->setValue(
-                            success
-                                ? nextToggleState
-                                : (nextToggleState == CAPITAL_ON_STR ? CAPITAL_OFF_STR : CAPITAL_ON_STR)
-                        );
-        
-                        // Update toggle state in a single line
+                        lastSelectedListItem->setValue(finalState);
+                
+                        // Update toggle state
                         static_cast<tsl::elm::ToggleListItem*>(lastSelectedListItem)
-                            ->setState(nextToggleState == CAPITAL_ON_STR ? success : !success);
-        
+                            ->setState(finalState == CAPITAL_ON_STR);
+                
+                        // Save to config file
+                        setIniFileValue(packageConfigIniPath, lastKeyName, FOOTER_STR, finalState);
+                        
+                        lastKeyName.clear();
                         nextToggleState.clear();
                     }
                 }
@@ -6396,37 +6403,67 @@ public:
             return handleRunningInterpreter(keysDown, keysHeld);
     
         if (lastRunningInterpreter.load(acquire)) {
+            //tsl::clearGlyphCacheNow.store(true, release);
             isDownloadCommand.store(false, release);
+        
             if (lastSelectedListItem) {
+                const bool success = commandSuccess.load(acquire);
+        
                 if (lastCommandMode == OPTION_STR || lastCommandMode == SLOT_STR) {
-                    if (commandSuccess.load(acquire)) {
+                    if (success) {
                         if (isFile(packageConfigIniPath)) {
                             auto packageConfigData = getParsedDataFromIniFile(packageConfigIniPath);
-                            auto it = packageConfigData.find(lastKeyName);
-                            if (it != packageConfigData.end()) {
+        
+                            if (auto it = packageConfigData.find(lastKeyName); it != packageConfigData.end()) {
                                 auto& optionSection = it->second;
-                                auto footerIt = optionSection.find(FOOTER_STR);
-                                if (footerIt != optionSection.end() && (footerIt->second.find(NULL_STR) == std::string::npos)) {
+        
+                                // Update footer if valid
+                                if (auto footerIt = optionSection.find(FOOTER_STR);
+                                    footerIt != optionSection.end() &&
+                                    footerIt->second.find(NULL_STR) == std::string::npos)
+                                {
                                     lastSelectedListItem->setValue(footerIt->second);
                                 }
                             }
-                            //lastSelectedListItem = nullptr;
-                            lastCommandMode = "";
+        
+                            lastCommandMode.clear();
                         } else {
                             lastSelectedListItem->setValue(CHECKMARK_SYMBOL);
                         }
                     } else {
                         lastSelectedListItem->setValue(CROSSMARK_SYMBOL);
                     }
-                }
-                else
-                    lastSelectedListItem->setValue(commandSuccess.load(acquire) ? CHECKMARK_SYMBOL : CROSSMARK_SYMBOL);
+                } else {
+                    // Handle toggle or checkmark logic
+                    if (nextToggleState.empty()) {
+                        lastSelectedListItem->setValue(success ? CHECKMARK_SYMBOL : CROSSMARK_SYMBOL);
+                    } else {
+                        // Determine the final state to save
+                        std::string finalState = success 
+                            ? nextToggleState 
+                            : (nextToggleState == CAPITAL_ON_STR ? CAPITAL_OFF_STR : CAPITAL_ON_STR);
+                        
+                        // Update displayed value
+                        lastSelectedListItem->setValue(finalState);
                 
+                        // Update toggle state
+                        static_cast<tsl::elm::ToggleListItem*>(lastSelectedListItem)
+                            ->setState(finalState == CAPITAL_ON_STR);
+                
+                        // Save to config file
+                        setIniFileValue(packageConfigIniPath, lastKeyName, FOOTER_STR, finalState);
+                        
+                        lastKeyName.clear();
+                        nextToggleState.clear();
+                    }
+                }
+        
                 lastSelectedListItem->enableClickAnimation();
                 lastSelectedListItem = nullptr;
             }
-    
+        
             closeInterpreterThread();
+            resetPercentages();
             lastRunningInterpreter.store(false, std::memory_order_release);
             return true;
         }
