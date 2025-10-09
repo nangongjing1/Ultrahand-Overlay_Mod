@@ -167,14 +167,14 @@ static Result setGlobalRegion() {
         }
     }
     return rc;
-}
+}   //实现转区到港版
 
 static void switchTencentVerToGlobalVer() {
     Result rc;
     std::string cfgFilePath;
 
     bool force_switch = false;
-    cfgFilePath = std::string("sdmc:/config/") + "Ultrahand" + "/" + "force_swtich.flag";
+    cfgFilePath = std::string("sdmc:/config/") + "Ultrahand" + "/" + "force_swtich.flag";  //强制转区标记
     if (std::filesystem::exists(cfgFilePath))
         force_switch = true;
 
@@ -200,10 +200,10 @@ static void switchTencentVerToGlobalVer() {
             setsysExit();
             fatalThrow(MAKERESULT(Module_HomebrewLoader, R_DESCRIPTION(rc)));
             return;
-        }
+        }   //默认只对虚拟系统执行自动转区操作
 
         bool is_do_for_ofw = false;
-        cfgFilePath = std::string("sdmc:/config/") + "Ultrahand" + "/" + "enable_for_ofw.flag";
+        cfgFilePath = std::string("sdmc:/config/") + "Ultrahand" + "/" + "enable_for_ofw.flag";   //允许真实系统转区标记
         if (std::filesystem::exists(cfgFilePath))
             is_do_for_ofw = true;
         if (!is_emummc && !is_do_for_ofw) {
@@ -217,15 +217,15 @@ static void switchTencentVerToGlobalVer() {
         setsysExit();
         fatalThrow(MAKERESULT(Module_HomebrewLoader, R_DESCRIPTION(rc)));
         return;
-    }
+    }   //全球版switch，不执行转区代码
 
     if (isTencentVersion)
         rc = setGlobalRegion();
-
+        //国行自动转区
     setsysExit();
     if (R_FAILED(rc))
         fatalThrow(MAKERESULT(Module_HomebrewLoader, R_DESCRIPTION(rc)));
-}   //国行自动转区
+}
 
 
 template<typename Map, typename Func = std::function<std::string(const std::string&)>, typename... Args>
