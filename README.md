@@ -2,8 +2,9 @@
 [![platform](https://img.shields.io/badge/platform-Switch-898c8c?logo=C++.svg)](https://gbatemp.net/forums/nintendo-switch.283/?prefix_id=44)
 [![language](https://img.shields.io/badge/language-C++-ba1632?logo=C++.svg)](https://github.com/topics/cpp)
 [![GPLv2 License](https://img.shields.io/badge/license-GPLv2-189c11.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
-[![Latest Version](https://img.shields.io/github/v/release/ppkantorski/Ultrahand-Overlay?label=latest%20version&color=blue)](https://github.com/ppkantorski/Ultrahand-Overlay/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/ppkantorski/Ultrahand-Overlay/total?color=6f42c1)](https://github.com/ppkantorski/Ultrahand-Overlay/graphs/traffic)
+[![Latest Version](https://img.shields.io/github/v/release/ppkantorski/Ultrahand-Overlay?label=latest&color=blue)](https://github.com/ppkantorski/Ultrahand-Overlay/releases/latest)
+[![GitHub Downloads](https://img.shields.io/github/downloads/ppkantorski/Ultrahand-Overlay/total?color=6f42c1)](https://somsubhra.github.io/github-release-stats/?username=ppkantorski&repository=Ultrahand-Overlay&page=1&per_page=300)
+[![HB App Store](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/ppkantorski/Ultrahand-Overlay/main/.github/hbappstore.json&label=hb%20app%20store&color=6f42c1)](https://hb-app.store/switch/UltrahandOverlay)
 [![GitHub issues](https://img.shields.io/github/issues/ppkantorski/Ultrahand-Overlay?color=222222)](https://github.com/ppkantorski/Ultrahand-Overlay/issues)
 [![GitHub stars](https://img.shields.io/github/stars/ppkantorski/Ultrahand-Overlay)](https://github.com/ppkantorski/Ultrahand-Overlay/stargazers)
 
@@ -11,7 +12,7 @@ Create directories, manage files, and customize configurations effortlessly usin
 
 [![Ultrahand Logo](.pics/banner.gif)](https://gbatemp.net/threads/ultrahand-overlay-the-fully-craft-able-overlay-executor.633560/)
 
-Ultrahand Overlay is a [Tesla Menu](https://github.com/WerWolv/Tesla-Menu) replacement built from the ground up off of [libtesla](https://github.com/WerWolv/libtesla) that provides powerful C/C++ commands through the usage of its own [custom interpretive programming language](https://github.com/ppkantorski/Ultrahand-Overlay/wiki/Command-Reference) (similar to Shell/BASH).  It is a versatile tool that enables you to create and share custom command-based packages, providing enhanced functionality for managing settings, files and directories on your Nintendo Switch.
+Ultrahand Overlay is an overlay menu ecosystem built from the ground up off of [libultrahand](https://github.com/ppkantorski/libultrahand) (an expanded fork of [libtesla](https://github.com/WerWolv/libtesla)) that provides powerful C/C++ commands through the usage of its own custom interpretive [programming language](https://github.com/ppkantorski/Ultrahand-Overlay/wiki/Command-Reference) (similar to Shell/BASH).  It is a versatile tool that enables users to create and share custom command-based packages, providing enhanced functionality for managing settings, files and directories on your Nintendo Switch.
 
 With Ultrahand, you have the flexibility to customize and shape your file management system according to your needs, empowering you with greater control over your system configurations.
 
@@ -50,7 +51,7 @@ Ultrahand Overlay currently offers the following features:
   - Convert `pchtxt` mods into `ips` or `cheats` format.
 
 - System Commands:
-  - There are a variety of system commands that users can utilize.  These include functions to shutdown, reboot, reboot directly into Hekate entries/modes, manipulate the screen's backlight, and turn off all bluetooth controllers.
+  - There are a variety of system commands that users can utilize.  These include functions to shutdown, reboot, reboot directly into Hekate entries/modes, manipulate the screen's backlight, volume settings, and turn off all bluetooth controllers.
 
 - Run Commmands On Boot:
   - Users can also utilize their own `/switch/.packages/boot_package.ini` file (with a command section `boot`) to run a series of commands once upon device boot-up.
@@ -61,13 +62,15 @@ Ultrahand Overlay currently offers the following features:
 
 To use Ultrahand, follow these steps:
 
-1. Download and install the latest [nx-ovlloader / nx-ovlloader+](https://github.com/ppkantorski/nx-ovlloader/releases/latest).
+1. Download and install the latest [nx-ovlloader](https://github.com/ppkantorski/nx-ovlloader/releases/latest/download/nx-ovlloader.zip) / [nx-ovlloader+](https://github.com/ppkantorski/nx-ovlloader/releases/latest/download/nx-ovlloader+.zip).
+    - **Sidenote:** nx-ovlloader+ consumes 2MB more of system memory than nx-ovlloader and provides expanded features. Users can also switch between the two within the Ultrahand Settings Menu.
 2. Download the latest Ultrahand [ovlmenu.ovl](https://github.com/ppkantorski/Ultrahand-Overlay/releases/latest/download/ovlmenu.ovl) and place it within `/switch/.overlays/`.
-    - WARNING: This will overwrite `Tesla Menu` if already installed.
+    - **WARNING:** This will overwrite `Tesla Menu` if already installed.
 3. After installing Ultrahand Overlay, a new folder named `ultrahand` will be created within the root config folder on your SD card (`/config/ultrahand/`) along with a `config.ini` file containing various Ultrahand settings.
-4. Launch Ultrahand (similarly to `Tesla Menu`) with Tesla's default hotkeys or Ultrahand's (`ZL+ZR+DDOWN`).  A new folder will be made (`/switch/.packages/`) with a preset `package.ini` file for your base menu commands.
+4. Launch Ultrahand (similarly to `Tesla Menu`) with Ultrahand's default hotkeys (`ZL+ZR+DDOWN`) or Tesla's.  A new folder will be made (`/switch/.packages/`) with a preset `package.ini` file for your base menu commands.
 
-5. Place your custom `package.ini` package file in your Ultrahand package directory (`/switch/.packages/<PACKAGE_NAME>/`). This file will contains the commands for your custom Ultrahand package. If your Ultrahand package does not show up, you may need to run `Fix Bit Archive` in Hekate.
+5. Place your custom `package.ini` package file in your Ultrahand package directory (`/switch/.packages/<PACKAGE_NAME>/`). This file will contains the commands for your custom Ultrahand package.
+    - **Sidenote:** If your Ultrahand package does not show up, you may need to run `Fix Bit Archive` in Hekate.
     - See [Ultrahand Packages](https://github.com/ppkantorski/Ultrahand-Packages) for a comprehensive list of known packages.
 
 6. Your commands will now show up on the packages menu within Ultrahand.
@@ -92,10 +95,8 @@ To compile and run the software, you need to have the following C/C++ dependenci
 - [libultrahand](https://github.com/ppkantorski/libultrahand)
 - libnx
 - switch-curl
-- switch-zziplib
+- switch-zlib
 - switch-mbedtls
-- switch-jansson
-
 
 ## Contributing
 
