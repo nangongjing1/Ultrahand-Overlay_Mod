@@ -14,7 +14,7 @@
     "SIMPLIFIED_CHINESE": "簡體中文",
     "TRADITIONAL_CHINESE": "繁體中文",
     "DEFAULT_CHAR_WIDTH": "0.33",
-    "UNAVAILABLE_SELECTION": "沒有可選擇的文件",
+    "UNAVAILABLE_SELECTION": "未知",
     "OVERLAYS": "插件列表",
     "OVERLAYS_ABBR": "插件列表",
     "OVERLAY": "插件",
