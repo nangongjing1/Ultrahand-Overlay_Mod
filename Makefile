@@ -57,7 +57,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 APP_TITLE	:= Ultrahand
 APP_AUTHOR	:= ppkantorski
-APP_VERSION	:= 2.1.4
+APP_VERSION	:= 2.1.5
 TARGET		:= ovlmenu
 BUILD		:= build
 SOURCES		:= source common
@@ -71,7 +71,7 @@ include ${TOPDIR}/lib/libultrahand/ultrahand.mk
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
-ARCH := -march=armv8-a+simd+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
+ARCH := -march=armv8-a+simd+crypto+fp+crc -mtune=cortex-a57 -mtp=soft -fPIE
 
 CFLAGS := -g -Wall -Os -ffunction-sections -fdata-sections -flto -fuse-linker-plugin -fomit-frame-pointer -finline-small-functions \
 			$(ARCH) $(DEFINES)

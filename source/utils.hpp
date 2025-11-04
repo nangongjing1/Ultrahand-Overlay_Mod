@@ -1177,6 +1177,20 @@ void addDummyListItem(auto& list, s32 index = -1) {
     list->addItem(new tsl::elm::DummyListItem(), 0, index);
 }
 
+void addSelectionIsEmptyDrawer(auto& list) {
+    addDummyListItem(list);
+    auto* warning = new tsl::elm::CustomDrawer([](tsl::gfx::Renderer* renderer, u16, u16, u16, u16){
+        // Icon
+        const size_t iconX = (448 - renderer->getTextDimensions("\uE150", false, 90).first) / 2;
+        renderer->drawString("\uE150", false, iconX, 324, 90, tsl::defaultTextColor);
+
+        // Text
+        const size_t textX = (448 - renderer->getTextDimensions(SELECTION_IS_EMPTY, false, 25).first) / 2;
+        renderer->drawString(SELECTION_IS_EMPTY, false, textX, 410, 25, tsl::defaultTextColor);
+    });
+    list->addItem(warning);
+}
+
 // Helper function to wrap text into multiple lines based on a maximum width (character count)
 // Subsequent lines are indented by 4 spaces
 //std::vector<std::string> wrapText(const std::string& text, size_t maxWidth) {
@@ -3481,8 +3495,8 @@ bool interpretAndExecuteCommands(std::vector<std::vector<std::string>>&& command
     // Process commands one by one, clearing each after processing
     for (size_t i = 0; i < commands.size(); ++i) {
         // Check for abort signal
-        if (abortCommand.load(std::memory_order_acquire)) {
-            abortCommand.store(false, std::memory_order_release);
+        if (abortCommand.exchange(false, std::memory_order_acq_rel)) {
+            //abortCommand.store(false, std::memory_order_release);
             commandSuccess.store(false, std::memory_order_release);
             // Clear all remaining commands
             //for (size_t j = i; j < commands.size(); ++j) {
@@ -3997,12 +4011,12 @@ void handleMoveCommand(const std::vector<std::string>& cmd, const std::string& p
             
             // Periodically shrink strings if they've grown too large
             // This prevents unbounded memory growth for very long paths
-            if (sourcePath.capacity() > 8192) {
-                sourcePath.shrink_to_fit();
-            }
-            if (destinationPath.capacity() > 8192) {
-                destinationPath.shrink_to_fit();
-            }
+            //if (sourcePath.capacity() > 8192) {
+            //    sourcePath.shrink_to_fit();
+            //}
+            //if (destinationPath.capacity() > 8192) {
+            //    destinationPath.shrink_to_fit();
+            //}
         }
         
         fclose(sourceFile);
@@ -4021,7 +4035,7 @@ void handleMoveCommand(const std::vector<std::string>& cmd, const std::string& p
         }
         
         // Set larger buffers for better I/O performance
-        static char sourceFileBuffer[8192], destFileBuffer[8192];
+        char sourceFileBuffer[8192], destFileBuffer[8192];
         sourceFile.rdbuf()->pubsetbuf(sourceFileBuffer, sizeof(sourceFileBuffer));
         destFile.rdbuf()->pubsetbuf(destFileBuffer, sizeof(destFileBuffer));
         
@@ -4416,6 +4430,11 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
                     break;
                 }
                 if (downloadSuccess) break;
+
+                // ADD THIS: Give time for cleanup before retry
+                if (i < 2) {  // Don't sleep after last attempt
+                    svcSleepThread(200'000'000);
+                }
             }
             commandSuccess.store(
                 downloadSuccess &&
@@ -4814,6 +4833,10 @@ inline void clearInterpreterFlags(bool state = false) {
 }
 
 void backgroundInterpreter(void* workPtr) {
+    //if (ult::expandedMemory && ult::useSoundEffects) {
+    //    clearSoundCacheNow.wait(true, std::memory_order_acquire);
+    //}
+
     // Get work data directly - no queue needed
     auto workData = static_cast<InterpreterWorkData*>(workPtr);
     
@@ -4823,6 +4846,7 @@ void backgroundInterpreter(void* workPtr) {
         return;
     }
     
+
     // Process the work if we have commands
     if (!workData->commands.empty()) {
         // Clear flags and setup for execution
@@ -4874,27 +4898,34 @@ int getInterpreterStackSize(const std::string& packagePath = "") {
     #endif
     // Cache stack size parsing to avoid repeated INI file access
     if (cachedStackSize == 0) {
-        const std::string interpreterHeap = parseValueFromIniSection(ULTRAHAND_CONFIG_INI_PATH, MEMORY_STR, "interpreter_heap");
+        std::string interpreterHeap = parseValueFromIniSection(ULTRAHAND_CONFIG_INI_PATH, MEMORY_STR, "interpreter_heap");
+
         if (!interpreterHeap.empty()) {
-            // Validate hex string before conversion
-            bool validHex = true;
-            for (size_t i = 0; i < interpreterHeap.length(); ++i) {
-                char c = interpreterHeap[i];
+            // Strip optional "0x" or "0X" prefix
+            if (interpreterHeap.size() > 2 && interpreterHeap[0] == '0' &&
+                (interpreterHeap[1] == 'x' || interpreterHeap[1] == 'X')) {
+                interpreterHeap = interpreterHeap.substr(2);
+            }
+
+            // Validate remaining string is hex
+            bool validHex = !interpreterHeap.empty();
+            for (char c : interpreterHeap) {
                 if (!std::isxdigit(static_cast<unsigned char>(c))) {
                     validHex = false;
                     break;
                 }
             }
-            
+
             if (validHex) {
                 cachedStackSize = ult::stoi(interpreterHeap, nullptr, 16);  // Convert from base 16
             } else {
-                cachedStackSize = 0x8000;  // Default value if invalid hex
+                cachedStackSize = 0x8000;  // Default if invalid
             }
         } else {
-            cachedStackSize = 0x8000;  // Default value
+            cachedStackSize = 0x8000;  // Default if empty
         }
     }
+
     return cachedStackSize;
 }
 
@@ -4912,6 +4943,22 @@ void executeInterpreterCommands(std::vector<std::vector<std::string>>&& commands
     // Early exit if no commands
     if (commands.empty()) {
         return;
+    }
+
+    if (ult::expandedMemory && ult::useSoundEffects) {
+        //clearSoundCacheNow.store(true, std::memory_order_release);
+        if (triggerEnterSound.exchange(false)) {
+            ult::AudioPlayer::playEnterSound();
+        } else if (triggerOnSound.exchange(false)) {
+            ult::AudioPlayer::playOnSound();
+        } else if (triggerOffSound.exchange(false)) {
+            ult::AudioPlayer::playOffSound();
+        }
+
+        //ult::AudioPlayer::exit();
+
+        ult::AudioPlayer::unloadAllSounds({ult::AudioPlayer::SoundType::Wall});
+        //clearSoundCacheNow.wait(true, std::memory_order_acquire);
     }
     
     // Get stack size and setup logging
