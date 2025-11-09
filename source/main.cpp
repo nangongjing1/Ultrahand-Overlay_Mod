@@ -68,9 +68,9 @@ static bool themeWasChanged = false;
 
 //static bool inMainMenu = false; // moved to libtesla
 static bool wasInHiddenMode = false;
-static bool inHiddenMode = false;
-static bool inSettingsMenu = false;
-static bool inSubSettingsMenu = false;
+//static bool inHiddenMode = false;
+//static bool inSettingsMenu = false;
+//static bool inSubSettingsMenu = false;
 static bool inPackageMenu = false;
 static bool inSubPackageMenu = false;
 static bool inScriptMenu = false;
@@ -386,6 +386,8 @@ class MainMenu;
 
 
 static std::string lastSelectedListItemFooter;
+static std::string returnJumpItemName;
+static std::string returnJumpItemValue;
 
 class UltrahandSettingsMenu : public tsl::Gui {
 private:
@@ -1402,7 +1404,7 @@ public:
                     
                     if (reloadMenu) {
                         //sl::pop(2);
-                        tsl::swapTo<MainMenu>(SwapDepth(2), lastMenuMode);
+                        tsl::swapTo<MainMenu>(SwapDepth(3), lastMenuMode);
                         reloadMenu = false;
                     } else {
                         tsl::goBack();
@@ -1425,7 +1427,7 @@ public:
                 
                 if (reloadMenu2) {
                     //tsl::goBack(2);
-                    tsl::swapTo<UltrahandSettingsMenu>(SwapDepth(2));
+                    tsl::swapTo<UltrahandSettingsMenu>(SwapDepth(3));
                     reloadMenu2 = false;
                 } else {
                     tsl::goBack();
@@ -4220,9 +4222,13 @@ bool drawCommandsMenu(
                             });
                             listItem->disableClickAnimation();
                         } else {
-                            listItem->setClickListener([optionName, i, packageIniPath, lastPackageHeader, showWidget](s64 keys) {
+                            listItem->setClickListener([optionName, cleanOptionName, i, packageIniPath, lastPackageHeader, showWidget](s64 keys) {
                                 if (runningInterpreter.load(acquire))
                                     return false;
+
+                                if (simulatedMenu.load(std::memory_order_acquire)) {
+                                    keys |= SYSTEM_SETTINGS_KEY;
+                                }
 
                                 if ((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
                                     inPackageMenu = false;
@@ -4240,6 +4246,11 @@ bool drawCommandsMenu(
                                     //auto options = loadOptionsFromIni(packageIniPath);
 
                                     tsl::changeTo<ScriptOverlay>(std::move(gatherPromptCommands(optionName, std::move(loadOptionsFromIni(packageIniPath)))), PACKAGE_PATH, optionName, "main", true, lastPackageHeader, showWidget);
+                                    return true;
+                                } else if (keys & SYSTEM_SETTINGS_KEY && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
+                                    skipJumpReset.store(false, std::memory_order_release);
+                                    returnJumpItemName = cleanOptionName;
+                                    returnJumpItemValue = "";
                                     return true;
                                 }
                                 return false;
@@ -4884,6 +4895,10 @@ bool drawCommandsMenu(
                         listItem->setClickListener([commands, keyName = originalOptionName, dropdownSection, packagePath, currentPage, packageName, nestedLayer, cleanOptionName, listItem,
                             forwarderPackagePath, forwarderPackageIniName, lastPackageHeader, pageHeader, showWidget, i](s64 keys) mutable {
 
+                            if (simulatedMenu.load(std::memory_order_acquire)) {
+                                keys |= SYSTEM_SETTINGS_KEY;
+                            }
+
                             if ((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
                                 interpretAndExecuteCommands(std::move(getSourceReplacement(commands, keyName, i, packagePath)), packagePath, keyName);
                                 resetPercentages();
@@ -4947,17 +4962,26 @@ bool drawCommandsMenu(
                                 // add lines ;mode=forwarder and package_source 'forwarderPackagePath' to front of modifiedCmds
                                 tsl::changeTo<ScriptOverlay>(std::move(getSourceReplacement(commands, keyName, i, packagePath)), packagePath, selectionItem, isFromMainMenu ? "main" : "package", true, lastPackageHeader, showWidget);
                                 return true;
+                            } else if ((packagePath == PACKAGE_PATH) && (keys & SYSTEM_SETTINGS_KEY) && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
+                                skipJumpReset.store(false, std::memory_order_release);
+                                returnJumpItemName = cleanOptionName;
+                                returnJumpItemValue = "";
+                                return true;
                             }
                             return false;
                         });
                         listItem->disableClickAnimation();
                     } else {
-                        listItem->setClickListener([commands, keyName = originalOptionName, dropdownSection, packagePath, packageName,
+                        listItem->setClickListener([commands, keyName = originalOptionName, cleanOptionName, dropdownSection, packagePath, packageName,
                             footer, lastSection, listItem, lastPackageHeader, commandMode, showWidget, i](uint64_t keys) {
                             //listItemPtr = std::shared_ptr<tsl::elm::ListItem>(listItem, [](auto*){})](uint64_t keys) {
                             
                             if (runningInterpreter.load(acquire))
                                 return false;
+
+                            if (simulatedMenu.load(std::memory_order_acquire)) {
+                                keys |= SYSTEM_SETTINGS_KEY;
+                            }
 
                             if (((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK)))) {
                                 if (footer != UNAVAILABLE_SELECTION && footer != NOT_AVAILABLE_STR && (footer.find(NULL_STR) == std::string::npos)) {
@@ -5022,6 +5046,11 @@ bool drawCommandsMenu(
                                 applyPlaceholderReplacementsToCommands(modifiedCmds, packagePath);
                                 tsl::changeTo<ScriptOverlay>(std::move(modifiedCmds), packagePath, selectionItem, isFromMainMenu ? "main" : "package", true, lastPackageHeader, showWidget);
                                 return true;
+                            } else if ((packagePath == PACKAGE_PATH) && (keys & SYSTEM_SETTINGS_KEY) && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
+                                skipJumpReset.store(false, std::memory_order_release);
+                                returnJumpItemName = cleanOptionName;
+                                returnJumpItemValue = "";
+                                return true;
                             }
                             return false;
                         });
@@ -5050,11 +5079,15 @@ bool drawCommandsMenu(
                             listItem->setValue(footer);
                         
                         
-                        listItem->setClickListener([i, commands, keyName = originalOptionName, packagePath, packageName,
+                        listItem->setClickListener([i, commands, keyName = originalOptionName, cleanOptionName, packagePath, packageName,
                             selectedItem, listItem, lastPackageHeader, commandMode, showWidget](uint64_t keys) {
                             
                             if (runningInterpreter.load(acquire)) {
                                 return false;
+                            }
+
+                            if (simulatedMenu.load(std::memory_order_acquire)) {
+                                keys |= SYSTEM_SETTINGS_KEY;
                             }
 
                             if (((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK)))) {
@@ -5094,6 +5127,11 @@ bool drawCommandsMenu(
                                 auto modifiedCmds = getSourceReplacement(commands, selectedItem, i, packagePath);
                                 applyPlaceholderReplacementsToCommands(modifiedCmds, packagePath);
                                 tsl::changeTo<ScriptOverlay>(std::move(modifiedCmds), packagePath, keyName, isFromMainMenu ? "main" : "package", false, lastPackageHeader, showWidget);
+                                return true;
+                            } else if ((packagePath == PACKAGE_PATH) && (keys & SYSTEM_SETTINGS_KEY) && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
+                                skipJumpReset.store(false, std::memory_order_release);
+                                returnJumpItemName = cleanOptionName;
+                                returnJumpItemValue = "";
                                 return true;
                             }
                             return false;
@@ -5906,9 +5944,9 @@ public:
             if (skipJumpReset.exchange(false, std::memory_order_acq_rel)) {
                 return;
             }
-            jumpItemName = "";
-            jumpItemValue = "";
-            jumpItemExactMatch.store(true, release);
+            jumpItemName = std::move(returnJumpItemName);
+            jumpItemValue = std::move(returnJumpItemValue);
+            jumpItemExactMatch.store(false, release);
         }
         settingsInitialized.store(true, release);
     }
@@ -5997,11 +6035,13 @@ public:
     
         auto* rootFrame = new tsl::elm::OverlayFrame(CAPITAL_ULTRAHAND_PROJECT_NAME, versionLabel, noClickableItems, menuMode+hiddenMenuMode+dropdownSection, "", "", "");
         
-        if (g_overlayFilename != "ovlmenu.ovl") {
-            list->jumpToItem(jumpItemName, jumpItemValue, jumpItemExactMatch.load(acquire));
-        } else {
-            g_overlayFilename = "";
-        }
+        list->jumpToItem(jumpItemName, jumpItemValue, jumpItemExactMatch.load(acquire));
+        //if (g_overlayFilename != "ovlmenu.ovl") {
+        //    list->jumpToItem(jumpItemName, jumpItemValue, jumpItemExactMatch.load(acquire));
+        //} else {
+        //    g_overlayFilename = "";
+        //}
+
         
         rootFrame->setContent(list);
         return rootFrame;
@@ -6157,6 +6197,10 @@ public:
                 listItem->setClickListener([overlayFile, newStarred, overlayFileName, overlayName, overlayVersion](s64 keys) {
                     if (runningInterpreter.load(acquire)) return false;
         
+                    if (simulatedMenu.load(std::memory_order_acquire)) {
+                        keys |= SYSTEM_SETTINGS_KEY;
+                    }
+
                     if ((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
                         disableSound.store(true, std::memory_order_release);
 
@@ -6216,13 +6260,17 @@ public:
                             lastMenu = "hiddenMenuMode";
                             inHiddenMode = false;
                         }
-                        jumpItemName = newStarred ? STAR_SYMBOL + "  " + overlayName : overlayName;
+                        jumpItemName = !newStarred ? STAR_SYMBOL + "  " + overlayName : overlayName;
                         jumpItemValue = hideOverlayVersions ? "" : overlayVersion;
                         jumpItemExactMatch.store(true, release);
                         g_overlayFilename = "";
                         tsl::changeTo<SettingsMenu>(overlayFileName, OVERLAY_STR, overlayName, overlayVersion);
                         triggerRumbleClick.store(true, std::memory_order_release);
                         triggerSettingsSound.store(true, std::memory_order_release);
+                        return true;
+                    } else if (keys & SYSTEM_SETTINGS_KEY && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
+                        returnJumpItemName = !newStarred ? STAR_SYMBOL + "  " + overlayName : overlayName;
+                        returnJumpItemValue = hideOverlayVersions ? "" : overlayVersion;
                         return true;
                     }
                     return false;
@@ -6237,6 +6285,10 @@ public:
             tsl::elm::ListItem* listItem = new tsl::elm::ListItem(HIDDEN, DROPDOWN_SYMBOL);
             listItem->setClickListener([](uint64_t keys) {
                 if (runningInterpreter.load(acquire)) return false;
+                if (simulatedMenu.load(std::memory_order_acquire)) {
+                    keys |= SYSTEM_SETTINGS_KEY;
+                }
+
                 if ((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
                     g_overlayFilename = "";
                     jumpItemName = "";
@@ -6245,6 +6297,10 @@ public:
                     inMainMenu.store(false, std::memory_order_release);
                     inHiddenMode = true;
                     tsl::changeTo<MainMenu>(OVERLAYS_STR);
+                    return true;
+                } else if (keys & SYSTEM_SETTINGS_KEY && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
+                    returnJumpItemName = "";
+                    returnJumpItemValue = DROPDOWN_SYMBOL;
                     return true;
                 }
                 return false;
@@ -6397,6 +6453,10 @@ public:
                 listItem->setClickListener([packageFilePath, newStarred, packageName, newPackageName, packageVersion, packageStarred](s64 keys) {
                     if (runningInterpreter.load(acquire)) return false;
                     
+                    if (simulatedMenu.load(std::memory_order_acquire)) {
+                        keys |= SYSTEM_SETTINGS_KEY;
+                    }
+
                     if ((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
                         inMainMenu.store(false, std::memory_order_release);
                         
@@ -6458,13 +6518,17 @@ public:
                             lastMenu = "hiddenMenuMode";
                             inHiddenMode = false;
                         }
-                        jumpItemName = newStarred ? STAR_SYMBOL + "  " + newPackageName : newPackageName;
+                        jumpItemName = !newStarred ? STAR_SYMBOL + "  " + newPackageName : newPackageName;
                         jumpItemValue = hidePackageVersions ? "" : packageVersion;
                         jumpItemExactMatch.store(true, release);
                         g_overlayFilename = "";
                         tsl::changeTo<SettingsMenu>(packageName, PACKAGE_STR, newPackageName, packageVersion);
                         triggerRumbleClick.store(true, std::memory_order_release);
                         triggerSettingsSound.store(true, std::memory_order_release);
+                        return true;
+                    } else if (keys & SYSTEM_SETTINGS_KEY && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
+                        returnJumpItemName = !newStarred ? STAR_SYMBOL + "  " + newPackageName : newPackageName;
+                        returnJumpItemValue = hidePackageVersions ? "" : packageVersion;
                         return true;
                     }
                     return false;
@@ -6479,10 +6543,18 @@ public:
                 tsl::elm::ListItem* listItem = new tsl::elm::ListItem(HIDDEN, DROPDOWN_SYMBOL);
                 listItem->setClickListener([](uint64_t keys) {
                     if (runningInterpreter.load(acquire)) return false;
+                    if (simulatedMenu.load(std::memory_order_acquire)) {
+                        keys |= SYSTEM_SETTINGS_KEY;
+                    }
+
                     if ((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
                         inMainMenu.store(false, std::memory_order_release);
                         inHiddenMode = true;
                         tsl::changeTo<MainMenu>(PACKAGES_STR);
+                        return true;
+                    } else if (keys & SYSTEM_SETTINGS_KEY && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
+                        returnJumpItemName = "";
+                        returnJumpItemValue = DROPDOWN_SYMBOL;
                         return true;
                     }
                     return false;
@@ -6785,12 +6857,13 @@ public:
                     return true;
                 }
     
-                //if (simulatedMenu.exchange(false, acq_rel)) {
-                //    keysDown |= SYSTEM_SETTINGS_KEY;
-                //}
+                if (simulatedMenu.load(std::memory_order_acquire)) {
+                    keysDown |= SYSTEM_SETTINGS_KEY;
+                }
     
-                if (!isTouching && (((keysDown & SYSTEM_SETTINGS_KEY && !(keysHeld & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK))) || simulatedMenu.exchange(false, acq_rel))) {
+                if (!isTouching && (((keysDown & SYSTEM_SETTINGS_KEY && !(keysHeld & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK))))) {
                     inMainMenu.store(false, std::memory_order_release);
+                    skipJumpReset.store(false, std::memory_order_release);
                     tsl::changeTo<UltrahandSettingsMenu>();
                     triggerRumbleClick.store(true, std::memory_order_release);
                     triggerSettingsSound.store(true, std::memory_order_release);
@@ -6801,7 +6874,7 @@ public:
         
         if (!inMainMenu.load(acquire) && inHiddenMode && !returningToHiddenMain && !returningToMain) {
             simulatedNextPage.exchange(false, std::memory_order_acq_rel);
-            simulatedMenu.exchange(false, std::memory_order_acq_rel);
+            //simulatedMenu.exchange(false, std::memory_order_acq_rel);
     
             if (backKeyPressed) {
                 // Check if we're in hidden mode with no underlying menu to go back to
@@ -6852,6 +6925,20 @@ public:
                 allowSlide.exchange(false, std::memory_order_acq_rel);
                 unlockedSlide.exchange(false, std::memory_order_acq_rel);
                 tsl::goBack();
+                return true;
+            }
+
+            if (simulatedMenu.load(std::memory_order_acquire)) {
+                keysDown |= SYSTEM_SETTINGS_KEY;
+            }
+            
+            if (!isTouching && (((keysDown & SYSTEM_SETTINGS_KEY && !(keysHeld & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK))))) {
+                inMainMenu.store(false, std::memory_order_release);
+                skipJumpReset.store(false, std::memory_order_release);
+                lastMenu = "hiddenMenuMode";  // ADD THIS LINE
+                tsl::changeTo<UltrahandSettingsMenu>();
+                triggerRumbleClick.store(true, std::memory_order_release);
+                triggerSettingsSound.store(true, std::memory_order_release);
                 return true;
             }
         }
