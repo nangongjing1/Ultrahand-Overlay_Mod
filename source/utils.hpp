@@ -60,7 +60,8 @@ std::atomic<bool> usingMariko{util::IsMariko()};
 // Device info globals
 static char amsVersion[12];
 static char hosVersion[12];
-static std::string memoryType;
+
+//static std::string memoryType;
 static std::string memoryVendor = UNAVAILABLE_SELECTION;
 static std::string memoryModel = UNAVAILABLE_SELECTION;
 static std::string memorySize = UNAVAILABLE_SELECTION;
@@ -686,13 +687,13 @@ const char* getStorageInfo(const std::string& storageType) {
 void unpackDeviceInfo() {
     u64 packed_version;
     splGetConfig((SplConfigItem)2, &packed_version);
-    memoryType = getMemoryType(packed_version);
+    const std::string memoryType = getMemoryType(packed_version);
     //memoryVendor = UNAVAILABLE_SELECTION;
     //memoryModel = UNAVAILABLE_SELECTION;
     //memorySize = UNAVAILABLE_SELECTION;
     
     if (!memoryType.empty()) {
-        std::vector<std::string> memoryData = splitString(memoryType, "_");
+        const std::vector<std::string> memoryData = splitString(memoryType, "_");
         if (memoryData.size() > 0) memoryVendor = memoryData[0];
         if (memoryData.size() > 1) memoryModel = memoryData[1];
         if (memoryData.size() > 2) memorySize = memoryData[2];
@@ -704,6 +705,9 @@ void unpackDeviceInfo() {
     
     // Format HOS version
     formatVersion(packed_version, 24, 16, 8, hosVersion);
+
+    //usingHOS21orHigher = (strcmp(hosVersion, "20.0.0") >= 0); // set global variable
+
     splGetConfig((SplConfigItem)65007, &packed_version);
     usingEmunand = (packed_version != 0);
     fuseDumpToIni();
@@ -711,25 +715,19 @@ void unpackDeviceInfo() {
     if (isFileOrDirectory(FUSE_DATA_INI_PATH)) {
         // Load INI data once instead of 6 separate file reads
         const auto fuseSection = getKeyValuePairsFromSection(FUSE_DATA_INI_PATH, FUSE_STR);
+        const auto end = fuseSection.end();
         
-        const std::pair<const char*, u32*> keys[] = {
-            {"cpu_speedo_0", &cpuSpeedo0},
-            {"cpu_speedo_2", &cpuSpeedo2},
-            {"soc_speedo_0", &socSpeedo0},
-            {"cpu_iddq", &cpuIDDQ},
-            {"soc_iddq", &socIDDQ},
-            {"gpu_iddq", &gpuIDDQ}
-        };
-        
-        // Helper lambda to safely get u32 values
-        auto getU32Value = [&](const std::string& key) -> u32 {
+        auto getValue = [&](const char* key) -> u32 {
             auto it = fuseSection.find(key);
-            return (it != fuseSection.end() && !it->second.empty()) ? ult::stoi(it->second) : 0;
+            return (it != end && !it->second.empty()) ? ult::stoi(it->second) : 0;
         };
         
-        for (const auto& key : keys) {
-            *key.second = getU32Value(key.first);
-        }
+        cpuSpeedo0 = getValue("cpu_speedo_0");
+        cpuSpeedo2 = getValue("cpu_speedo_2");
+        socSpeedo0 = getValue("soc_speedo_0");
+        cpuIDDQ = getValue("cpu_iddq");
+        socIDDQ = getValue("soc_iddq");
+        gpuIDDQ = getValue("gpu_iddq");
     }
 }
 
@@ -1017,151 +1015,143 @@ void copyTeslaKeyComboToUltrahand() {
 constexpr int OverlayLoaderModuleId = 348;
 constexpr Result ResultSuccess = MAKERESULT(0, 0);
 constexpr Result ResultParseError = MAKERESULT(OverlayLoaderModuleId, 1);
-constexpr uint32_t ULTR_SIGNATURE = 0x52544C55;
+constexpr uint32_t ULTR_SIGNATURE  = 0x52544C55; // "ULTR"
+
 
 /**
- * @brief Retrieves overlay module information from a given file.
+ * @brief Retrieves overlay module information from a given file (ultra-optimized).
  *
  * @param filePath The path to the overlay module file.
  * @return A tuple containing the result code, module name, and display version.
  */
-std::tuple<Result, std::string, std::string, bool> getOverlayInfo(const std::string& filePath) {
-    
-#if !USING_FSTREAM_DIRECTIVE
+std::tuple<Result, std::string, std::string, bool, bool> getOverlayInfo(const std::string& filePath) {
     FILE* file = fopen(filePath.c_str(), "rb");
-    if (!file) {
-        return {ResultParseError, "", "", false};
-    }
-    
-    // Get file size once for bounds checking
+    if (!file) return {ResultParseError, "", "", false, false};
+
+    // Get file size
     fseek(file, 0, SEEK_END);
     const long fileSize = ftell(file);
-    if (static_cast<size_t>(fileSize) < sizeof(NroStart) + sizeof(NroHeader)) {
+    if (fileSize < static_cast<long>(sizeof(NroStart) + sizeof(NroHeader))) {
         fclose(file);
-        return {ResultParseError, "", "", false};
+        return {ResultParseError, "", "", false, false};
     }
+    const size_t fileSz = static_cast<size_t>(fileSize);
+
+    // --- Strategy: Read front chunk that likely contains header + MOD0 ---
+    // Most NRO files have MOD0 within first 8-16KB
+    constexpr size_t FRONT_READ_SIZE = 8192;  // 16KB
+    const size_t frontReadSize = (fileSz < FRONT_READ_SIZE) ? fileSz : FRONT_READ_SIZE;
     
-    // Read NRO header
-    fseek(file, sizeof(NroStart), SEEK_SET);
+    uint8_t* frontBuf = static_cast<uint8_t*>(malloc(frontReadSize));
+    if (!frontBuf) {
+        fclose(file);
+        return {ResultParseError, "", "", false, false};
+    }
+
+    fseek(file, 0, SEEK_SET);
+    if (fread(frontBuf, 1, frontReadSize, file) != frontReadSize) {
+        free(frontBuf);
+        fclose(file);
+        return {ResultParseError, "", "", false, false};
+    }
+
+    // Validate and extract NRO header from buffer
+    if (frontReadSize < sizeof(NroStart) + sizeof(NroHeader)) {
+        free(frontBuf);
+        fclose(file);
+        return {ResultParseError, "", "", false, false};
+    }
+
     NroHeader nroHeader;
-    if (fread(&nroHeader, sizeof(NroHeader), 1, file) != 1) {
+    std::memcpy(&nroHeader, frontBuf + sizeof(NroStart), sizeof(NroHeader));
+    
+    if (nroHeader.size == 0 || nroHeader.size >= fileSz) {
+        free(frontBuf);
         fclose(file);
-        return {ResultParseError, "", "", false};
+        return {ResultParseError, "", "", false, false};
     }
+
+    // --- Detect MOD0 LNY2 from front buffer ---
+    bool usesNewLibNX = false;
+
+    const uint32_t mod0_rel = *reinterpret_cast<const uint32_t*>(frontBuf + 0x4);
+    const uint32_t text_offset = *reinterpret_cast<const uint32_t*>(frontBuf + 0x20);
     
-    // Early validation of header size
-    if (nroHeader.size >= fileSize) {
+    if (text_offset < fileSz && mod0_rel != 0 && text_offset <= fileSz - mod0_rel) {
+        const uint32_t mod0_offset = text_offset + mod0_rel;
+        
+        // Check if MOD0 is in our front buffer (must check both offset and end are in buffer)
+        if (mod0_offset < frontReadSize && mod0_offset <= frontReadSize - 60) {
+            const uint8_t* mod0_ptr = frontBuf + mod0_offset;
+            
+            if (std::memcmp(mod0_ptr, "MOD0", 4) == 0 &&
+                std::memcmp(mod0_ptr + 52, "LNY2", 4) == 0) {
+                const uint32_t libnxVersion = *reinterpret_cast<const uint32_t*>(mod0_ptr + 56);
+                usesNewLibNX = (libnxVersion >= 1);
+            }
+        } else if (mod0_offset < fileSz && mod0_offset <= fileSz - 60) {
+            // MOD0 is beyond our buffer - need separate read
+            uint8_t mod0Buf[60];
+            fseek(file, mod0_offset, SEEK_SET);
+            if (fread(mod0Buf, 1, 60, file) == 60) {
+                if (std::memcmp(mod0Buf, "MOD0", 4) == 0 &&
+                    std::memcmp(mod0Buf + 52, "LNY2", 4) == 0) {
+                    const uint32_t libnxVersion = *reinterpret_cast<const uint32_t*>(mod0Buf + 56);
+                    usesNewLibNX = (libnxVersion >= 1);
+                }
+            }
+        }
+    }
+
+    free(frontBuf);
+
+    // --- Read NACP metadata ---
+    if (nroHeader.size + sizeof(NroAssetHeader) > fileSz) {
         fclose(file);
-        return {ResultParseError, "", "", false};
+        return {ResultParseError, "", "", false, usesNewLibNX};
     }
-    
-    // Check signature and read asset header in one operation
-    bool usingLibUltrahand = false;
-    uint32_t signature;
-    if (fileSize >= 4 && fseek(file, -4, SEEK_END) == 0 && 
-        fread(&signature, 4, 1, file) == 1 && signature == ULTR_SIGNATURE) {
-        usingLibUltrahand = true;
-    }
-    
-    // Read asset header
+
     fseek(file, nroHeader.size, SEEK_SET);
     NroAssetHeader assetHeader;
-    if (fread(&assetHeader, sizeof(NroAssetHeader), 1, file) != 1) {
+    if (fread(&assetHeader, sizeof(NroAssetHeader), 1, file) != 1 ||
+        assetHeader.nacp.offset > fileSz - nroHeader.size ||
+        nroHeader.size + assetHeader.nacp.offset + sizeof(NacpStruct) > fileSz) {
         fclose(file);
-        return {ResultParseError, "", "", false};
+        return {ResultParseError, "", "", false, usesNewLibNX};
     }
-    
-    // Validate NACP offset before seeking
-    const size_t nacpPos = nroHeader.size + assetHeader.nacp.offset;
-    if (nacpPos + sizeof(NacpStruct) > static_cast<size_t>(fileSize)) {
-        fclose(file);
-        return {ResultParseError, "", "", false};
-    }
-    
-    // Read NACP struct
-    fseek(file, nacpPos, SEEK_SET);
+
+    fseek(file, nroHeader.size + assetHeader.nacp.offset, SEEK_SET);
     NacpStruct nacp;
     if (fread(&nacp, sizeof(NacpStruct), 1, file) != 1) {
         fclose(file);
-        return {ResultParseError, "", "", false};
+        return {ResultParseError, "", "", false, usesNewLibNX};
     }
-    
-    fclose(file);
-    
-#else
-    // Optimized std::ifstream version
-    std::ifstream file(filePath, std::ios::binary);
-    if (!file) {
-        return {ResultParseError, "", "", false};
-    }
-    
-    // Get file size for validation
-    file.seekg(0, std::ios::end);
-    const auto fileSize = file.tellg();
-    if (fileSize < sizeof(NroStart) + sizeof(NroHeader)) {
-        return {ResultParseError, "", "", false};
-    }
-    
-    // Read NRO header
-    file.seekg(sizeof(NroStart), std::ios::beg);
-    NroHeader nroHeader;
-    if (!file.read(reinterpret_cast<char*>(&nroHeader), sizeof(NroHeader))) {
-        return {ResultParseError, "", "", false};
-    }
-    
-    // Early validation
-    if (nroHeader.size >= fileSize) {
-        return {ResultParseError, "", "", false};
-    }
-    
-    // Check signature
+
+    // --- Check ULTR signature (last 4 bytes of file) ---
+    uint32_t last4 = 0;
     bool usingLibUltrahand = false;
-    if (fileSize >= 4) {
-        file.seekg(-4, std::ios::end);
-        uint32_t signature;
-        if (file.read(reinterpret_cast<char*>(&signature), 4) && signature == ULTR_SIGNATURE) {
-            usingLibUltrahand = true;
-        }
+    
+    if (fileSz >= 4) {
+        fseek(file, -4, SEEK_END);
+        usingLibUltrahand = (fread(&last4, sizeof(last4), 1, file) == 1) && 
+                           (last4 == ULTR_SIGNATURE);
     }
+
+    fclose(file);
+
+    // --- Extract strings ---
+    const char* nameEnd = static_cast<const char*>(std::memchr(nacp.lang[0].name, '\0', sizeof(nacp.lang[0].name)));
+    const size_t nameLen = nameEnd ? (nameEnd - nacp.lang[0].name) : sizeof(nacp.lang[0].name);
     
-    // Read asset header
-    file.seekg(nroHeader.size, std::ios::beg);
-    NroAssetHeader assetHeader;
-    if (!file.read(reinterpret_cast<char*>(&assetHeader), sizeof(NroAssetHeader))) {
-        return {ResultParseError, "", "", false};
-    }
-    
-    // Validate NACP position
-    const auto nacpPos = nroHeader.size + assetHeader.nacp.offset;
-    if (nacpPos + sizeof(NacpStruct) > fileSize) {
-        return {ResultParseError, "", "", false};
-    }
-    
-    // Read NACP struct
-    file.seekg(nacpPos, std::ios::beg);
-    NacpStruct nacp;
-    if (!file.read(reinterpret_cast<char*>(&nacp), sizeof(NacpStruct))) {
-        return {ResultParseError, "", "", false};
-    }
-#endif
-    
-    // Optimized string construction using string_view-like approach
-    // Find string ends using pointer arithmetic (faster than indexing)
-    const char* nameStart = nacp.lang[0].name;
-    const char* nameEnd = nameStart;
-    const char* nameLimit = nameStart + sizeof(nacp.lang[0].name);
-    while (nameEnd < nameLimit && *nameEnd != '\0') ++nameEnd;
-    
-    const char* versionStart = nacp.display_version;
-    const char* versionEnd = versionStart;
-    const char* versionLimit = versionStart + sizeof(nacp.display_version);
-    while (versionEnd < versionLimit && *versionEnd != '\0') ++versionEnd;
-    
+    const char* versionEnd = static_cast<const char*>(std::memchr(nacp.display_version, '\0', sizeof(nacp.display_version)));
+    const size_t versionLen = versionEnd ? (versionEnd - nacp.display_version) : sizeof(nacp.display_version);
+
     return {
         ResultSuccess,
-        std::string(nameStart, nameEnd - nameStart),
-        std::string(versionStart, versionEnd - versionStart),
-        usingLibUltrahand
+        std::string(nacp.lang[0].name, nameLen),
+        std::string(nacp.display_version, versionLen),
+        usingLibUltrahand,
+        usesNewLibNX
     };
 }
 
@@ -2195,7 +2185,7 @@ void applyReplaceIniPlaceholder(std::string& arg, const std::string& commandName
             trim(iniKey);
             removeQuotes(iniKey);
             
-            replacement = parseValueFromIniSection(iniPath, iniSection, iniKey);
+            replacement = returnOrNull(parseValueFromIniSection(iniPath, iniSection, iniKey));
         } else {
             // Check if the content is an integer
             if (std::all_of(placeholderContent.begin(), placeholderContent.end(), ::isdigit)) {
