@@ -62,7 +62,7 @@ Ultrahand Overlay currently offers the following features:
 
 To use Ultrahand, follow these steps:
 
-1. Download and install the latest [nx-ovlloader](https://github.com/ppkantorski/nx-ovlloader/releases/latest/download/nx-ovlloader.zip) / [nx-ovlloader+](https://github.com/ppkantorski/nx-ovlloader/releases/latest/download/nx-ovlloader+.zip).
+1. Download and install the latest [nx-ovlloader](https://github.com/ppkantorski/nx-ovlloader).
     - **Sidenote:** nx-ovlloader+ consumes 2MB more of system memory than nx-ovlloader and provides expanded features. Users can also switch between the two within the Ultrahand Settings Menu.
 2. Download the latest Ultrahand [ovlmenu.ovl](https://github.com/ppkantorski/Ultrahand-Overlay/releases/latest/download/ovlmenu.ovl) and place it within `/switch/.overlays/`.
     - **WARNING:** This will overwrite `Tesla Menu` if already installed.
@@ -108,4 +108,4 @@ Contributions are welcome! If you have any ideas, suggestions, or bug reports, p
 
 This project is licensed and distributed under [GPLv2](LICENSE) with a [custom library](https://github.com/ppkantorski/libultrahand/tree/main/libultra) utilizing [CC-BY-4.0](SUB_LICENSE).
 
-Copyright (c) 2024 ppkantorski
+Copyright (c) 2023-2025 ppkantorski
