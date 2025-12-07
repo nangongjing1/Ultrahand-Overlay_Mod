@@ -3753,8 +3753,8 @@ public:
     
                         auto modifiedCmds = getSourceReplacement(selectionCommands, selectedItem, i, filePath);
                         applyPlaceholderReplacementsToCommands(modifiedCmds, filePath);
-                        tsl::elm::g_cachedTop.disabled = true;
-                        tsl::elm::g_cachedBottom.disabled = true;
+                        //tsl::elm::g_cachedTop.disabled = true;
+                        //tsl::elm::g_cachedBottom.disabled = true;
                         tsl::changeTo<ScriptOverlay>(std::move(modifiedCmds), filePath, itemName, "selection", false, currentPackageHeader, showWidget);
                         return true;
                     }
@@ -3863,8 +3863,8 @@ public:
                     // Custom logic for SCRIPT_KEY handling
                     auto modifiedCmds = getSourceReplacement(state ? selectionCommandsOn : selectionCommandsOff, currentSelectedItems[i], i, filePath);
                     applyPlaceholderReplacementsToCommands(modifiedCmds, filePath);
-                    tsl::elm::g_cachedTop.disabled = true;
-                    tsl::elm::g_cachedBottom.disabled = true;
+                    //tsl::elm::g_cachedTop.disabled = true;
+                    //tsl::elm::g_cachedBottom.disabled = true;
                     tsl::changeTo<ScriptOverlay>(std::move(modifiedCmds), filePath, itemName, "selection", false, currentPackageHeader, showWidget);
                 });
     
@@ -3922,7 +3922,7 @@ public:
     
         list->jumpToItem(jumpItemName, jumpItemValue, jumpItemExactMatch.load(acquire));
         
-        list->disableCaching();
+        list->disableCaching(true);
         rootFrame->setContent(list);
         if (showWidget)
             rootFrame->m_showWidget = true;
@@ -7597,9 +7597,7 @@ void initializeSettingsAndDirectories() {
     std::map<std::string, std::map<std::string, std::string>> iniData;
 
     // Check if file didn't exist
-    if (!isFile(ULTRAHAND_CONFIG_INI_PATH)) {
-        updateMenuCombos = true;
-    } else {
+    if (isFile(ULTRAHAND_CONFIG_INI_PATH)) {
         // Always try to load INI data (will be empty if file doesn't exist)
         iniData = getParsedDataFromIniFile(ULTRAHAND_CONFIG_INI_PATH);
         for (int i = 0; i < 3; i++) {
@@ -7668,51 +7666,18 @@ void initializeSettingsAndDirectories() {
     
     setDefaultStrValue(DEFAULT_LANG_STR, defaultLang, defaultLang);
 
-    // Ensure certain settings are set in the INI file if they don't exist (in memory)
-    if (ultrahandSection.count("datetime_format") == 0) {
-        ultrahandSection["datetime_format"] = DEFAULT_DT_FORMAT;
-        needsUpdate = true;
-    }
-
-    if (ultrahandSection.count("hide_clock") == 0) {
-        ultrahandSection["hide_clock"] = FALSE_STR;
-        needsUpdate = true;
-    }
-
-    if (ultrahandSection.count("hide_battery") == 0) {
-        ultrahandSection["hide_battery"] = TRUE_STR;
-        needsUpdate = true;
-    }
-
-    if (ultrahandSection.count("hide_pcb_temp") == 0) {
-        ultrahandSection["hide_pcb_temp"] = TRUE_STR;
-        needsUpdate = true;
-    }
-
-    if (ultrahandSection.count("hide_soc_temp") == 0) {
-        ultrahandSection["hide_soc_temp"] = TRUE_STR;
-        needsUpdate = true;
-    }
-
-    if (ultrahandSection.count("dynamic_widget_colors") == 0) {
-        ultrahandSection["dynamic_widget_colors"] = TRUE_STR;
-        needsUpdate = true;
-    }
-
-    if (ultrahandSection.count("hide_widget_backdrop") == 0) {
-        ultrahandSection["hide_widget_backdrop"] = FALSE_STR;
-        needsUpdate = true;
-    }
-
-    if (ultrahandSection.count("center_widget_alignment") == 0) {
-        ultrahandSection["center_widget_alignment"] = TRUE_STR;
-        needsUpdate = true;
-    }
-
-    if (ultrahandSection.count("extended_widget_backdrop") == 0) {
-        ultrahandSection["extended_widget_backdrop"] = FALSE_STR;
-        needsUpdate = true;
-    }
+    // Widget settings - now properly loaded into variables
+    setDefaultValue("hide_clock", FALSE_STR, hideClock);
+    setDefaultValue("hide_battery", TRUE_STR, hideBattery);
+    setDefaultValue("hide_pcb_temp", TRUE_STR, hidePCBTemp);
+    setDefaultValue("hide_soc_temp", TRUE_STR, hideSOCTemp);
+    setDefaultValue("dynamic_widget_colors", TRUE_STR, dynamicWidgetColors);
+    setDefaultValue("hide_widget_backdrop", FALSE_STR, hideWidgetBackdrop);
+    setDefaultValue("center_widget_alignment", TRUE_STR, centerWidgetAlignment);
+    setDefaultValue("extended_widget_backdrop", FALSE_STR, extendedWidgetBackdrop);
+    
+    // Datetime format string setting
+    setDefaultStrValue("datetime_format", DEFAULT_DT_FORMAT, datetimeFormat);
     
     // Check if settings were previously loaded
     settingsLoaded = ultrahandSection.count(IN_OVERLAY_STR) > 0;
@@ -7763,7 +7728,7 @@ void initializeSettingsAndDirectories() {
     // Initialize theme
     initializeTheme();
     tsl::initializeThemeVars();
-    copyTeslaKeyComboToUltrahand();
+    updateMenuCombos = copyTeslaKeyComboToUltrahand();
     
     // Set current menu based on settings
     static bool hasInitialized = false;
@@ -7931,15 +7896,6 @@ public:
     virtual void initServices() override {
         tsl::overrideBackButton = true; // for properly overriding the always go back functionality of KEY_B
 
-        // Retry socket initialization up to 3 times
-        //if (R_SUCCEEDED(socketInitializeDefault())) {
-            //initializeCurl();
-        //}
-        //if (!ult::limitedMemory)
-        //    socketInitializeDefault();
-        //else {
-        //    socketInitialize(&socketInitConfig);
-        //}
         constexpr SocketInitConfig socketInitConfig = {
             // TCP buffers
             .tcp_tx_buf_size     = 16 * 1024,   // 16 KB default
