@@ -538,9 +538,14 @@ void fuseDumpToIni(const std::string& outputPath = FUSE_DATA_INI_PATH) {
 std::string getLocalIpAddress() {
     Result rc;
     u32 ipAddress;
-
-    ASSERT_FATAL(nifmInitialize(NifmServiceType_User)); // for local IP
-
+    
+    // Initialize nifm service
+    rc = nifmInitialize(NifmServiceType_System);
+    if (R_FAILED(rc)) {
+        // Failed to initialize, return default
+        return UNAVAILABLE_SELECTION;
+    }
+    
     // Get the current IP address
     rc = nifmGetCurrentIpAddress(&ipAddress);
     if (R_SUCCEEDED(rc)) {
@@ -554,8 +559,9 @@ std::string getLocalIpAddress() {
         nifmExit();
         return std::string(ipStr);
     } else {
-        // Return a default IP address if the IP could not be retrieved
-        return UNAVAILABLE_SELECTION;  // Or "Unknown" if you prefer
+        // Clean up before returning default
+        nifmExit();
+        return UNAVAILABLE_SELECTION;
     }
 }
 
@@ -2218,6 +2224,7 @@ void applyReplaceIniPlaceholder(std::string& arg, const std::string& commandName
  * @brief Replaces a JSON source placeholder with the actual JSON source.
  *
  * Optimized version with variables moved to usage scope to avoid repeated allocations.
+ * Supports "null" key as a fallback default for failed lookups.
  *
  * @param arg The input string containing the placeholder.
  * @param commandName The name of the JSON command (e.g., "json", "json_file").
@@ -2256,6 +2263,9 @@ std::string replaceJsonPlaceholder(const std::string& arg, const std::string& co
     std::string key;
     bool validValue;
     
+    // Keep reference to root for "null" fallback lookups
+    cJSON* root = reinterpret_cast<cJSON*>(jsonDict.get());
+    
     while (startPos != std::string::npos) {
         endPos = arg.find(")}", startPos);
         if (endPos == std::string::npos) {
@@ -2266,7 +2276,7 @@ std::string replaceJsonPlaceholder(const std::string& arg, const std::string& co
         result.append(arg, lastPos, startPos - lastPos);
         
         nextPos = startPos + searchStringLen;
-        cJSON* value = reinterpret_cast<cJSON*>(jsonDict.get()); // Get the JSON root object
+        cJSON* value = root; // Start from root
         validValue = true;
         
         while (nextPos < endPos && validValue) {
@@ -2290,11 +2300,16 @@ std::string replaceJsonPlaceholder(const std::string& arg, const std::string& co
         }
         
         if (validValue && value && cJSON_IsString(value) && value->valuestring) {
-            result.append(value->valuestring); // Append replacement value
+            // Append the value as-is, even if it's an empty string
+            result.append(value->valuestring);
         } else {
-            // If replacement failed, keep the original placeholder
-            //result.append(arg, startPos, endPos + 2 - startPos);
-            result.append(NULL_STR);
+            // Key doesn't exist or isn't a string - try "null" fallback
+            cJSON* fallbackValue = cJSON_GetObjectItemCaseSensitive(root, NULL_STR.c_str());
+            if (fallbackValue && cJSON_IsString(fallbackValue) && fallbackValue->valuestring) {
+                result.append(fallbackValue->valuestring);
+            } else {
+                result.append(NULL_STR);
+            }
         }
         
         lastPos = endPos + 2;
@@ -5137,16 +5152,16 @@ void executeInterpreterCommands(std::vector<std::vector<std::string>>&& commands
     if (!ult::limitedMemory && ult::useSoundEffects) {
         //clearSoundCacheNow.store(true, std::memory_order_release);
         if (triggerEnterSound.exchange(false)) {
-            ult::AudioPlayer::playEnterSound();
+            ult::Audio::playEnterSound();
         } else if (triggerOnSound.exchange(false)) {
-            ult::AudioPlayer::playOnSound();
+            ult::Audio::playOnSound();
         } else if (triggerOffSound.exchange(false)) {
-            ult::AudioPlayer::playOffSound();
+            ult::Audio::playOffSound();
         }
 
-        //ult::AudioPlayer::exit();
+        //ult::Audio::exit();
 
-        ult::AudioPlayer::unloadAllSounds({ult::AudioPlayer::SoundType::Wall});
+        ult::Audio::unloadAllSounds({ult::Audio::SoundType::Wall});
         //clearSoundCacheNow.wait(true, std::memory_order_acquire);
     }
     
