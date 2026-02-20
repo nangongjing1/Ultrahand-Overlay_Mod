@@ -93,12 +93,15 @@ static size_t nestedMenuCount = 0;
 static const std::vector<std::string> commandSystems = {DEFAULT_STR, ERISTA_STR, MARIKO_STR};
 static const std::vector<std::string> commandModes = {DEFAULT_STR, HOLD_STR, SLOT_STR, TOGGLE_STR, OPTION_STR, FORWARDER_STR, TEXT_STR, TABLE_STR, TRACKBAR_STR, STEP_TRACKBAR_STR, NAMED_STEP_TRACKBAR_STR};
 static const std::vector<std::string> commandGroupings = {DEFAULT_STR, "split", "split2", "split3", "split4", "split5"};
+static const std::string SYSTEM_PATTERN = ";system=";
+static const std::string STATE_PATTERN = ";state=";
+static const std::string HOS_VERSION_PATTERN = ";hos_version=";
+static const std::string AMS_VERSION_PATTERN = ";ams_version=";
 static const std::string MODE_PATTERN = ";mode=";
 static const std::string GROUPING_PATTERN = ";grouping=";
 static const std::string FOOTER_PATTERN = ";footer=";
 static const std::string FOOTER_HIGHLIGHT_PATTERN = ";footer_highlight=";
 static const std::string HOLD_PATTERN = ";hold=";
-static const std::string SYSTEM_PATTERN = ";system=";
 static const std::string WIDGET_PATTERN = ";widget=";
 
 static const std::string MINI_PATTERN = ";mini=";
@@ -136,6 +139,9 @@ static const std::string ON_EVERY_TICK_PATTERN = ";on_every_tick=";
 
 
 static const size_t SYSTEM_PATTERN_LEN = SYSTEM_PATTERN.length();
+static const size_t STATE_PATTERN_LEN = STATE_PATTERN.length();
+static const size_t HOS_VERSION_PATTERN_LEN = HOS_VERSION_PATTERN.length();
+static const size_t AMS_VERSION_PATTERN_LEN = AMS_VERSION_PATTERN.length();
 static const size_t MODE_PATTERN_LEN = MODE_PATTERN.length();
 static const size_t GROUPING_PATTERN_LEN = GROUPING_PATTERN.length();
 static const size_t FOOTER_PATTERN_LEN = FOOTER_PATTERN.length();
@@ -294,11 +300,11 @@ inline void clearMemory() {
     //forwarderListItem = nullptr;
 }
 
-void shiftItemFocus(tsl::elm::Element* element) {
-    if (auto& currentGui = tsl::Overlay::get()->getCurrentGui()) {
-        currentGui->requestFocus(element, tsl::FocusDirection::None);
-    }
-}
+//void tsl::shiftItemFocus(tsl::elm::Element* element) {
+//    if (auto& currentGui = tsl::Overlay::get()->getCurrentGui()) {
+//        currentGui->requestFocus(element, tsl::FocusDirection::None);
+//    }
+//}
 
 
 /**
@@ -455,12 +461,13 @@ bool processHold(uint64_t keysDown, uint64_t keysHeld, u64& holdStartTick, bool&
             lastSelectedListItem->resetTouchHold();
             
             if (resetStoredCommands) {
-                bool highlightParam = true;
-                if (lastFooterHighlightDefined) {
-                    highlightParam = !lastFooterHighlight;
-                } else {
-                    highlightParam = !(lastCommandMode == SLOT_STR || lastCommandMode == OPTION_STR) || lastCommandMode.empty();
-                }
+                const bool highlightParam = lastFooterHighlightDefined ? !lastFooterHighlight :
+                    !(lastCommandMode == SLOT_STR || lastCommandMode == OPTION_STR) || lastCommandMode.empty();
+                //if (lastFooterHighlightDefined) {
+                //    highlightParam = !lastFooterHighlight;
+                //} else {
+                //    highlightParam = !(lastCommandMode == SLOT_STR || lastCommandMode == OPTION_STR) || lastCommandMode.empty();
+                //}
                 lastSelectedListItem->setValue(lastSelectedListItemFooter, highlightParam);
                 lastSelectedListItemFooter.clear();
             } else {
@@ -489,7 +496,7 @@ bool processHold(uint64_t keysDown, uint64_t keysHeld, u64& holdStartTick, bool&
     
     // Update hold progress
     const u64 elapsedMs = armTicksToNs(armGetSystemTick() - holdStartTick) / 1000000;
-    const int percentage = std::min(100, static_cast<int>((elapsedMs * 100) / 4000));
+    const int percentage = std::min(100, static_cast<int>((elapsedMs * 100) / 3000));
     displayPercentage.store(percentage, std::memory_order_release);
     
     if (percentage > 20 && (percentage % 30) == 0)
@@ -565,7 +572,7 @@ private:
                     }
                 }
 
-                shiftItemFocus(listItem);
+                tsl::shiftItemFocus(listItem);
                 tsl::changeTo<UltrahandSettingsMenu>(targetMenu);
                 //selectedListItem = nullptr;
                 selectedListItem = listItem;
@@ -713,7 +720,7 @@ private:
 
                     listItem->setValue(CHECKMARK_SYMBOL);
                     lastSelectedListItem = listItem;
-                    shiftItemFocus(listItem);
+                    tsl::shiftItemFocus(listItem);
                     if (lastSelectedListItem)
                         lastSelectedListItem->triggerClickAnimation();
                     
@@ -732,99 +739,74 @@ private:
         if (isVersionGreaterOrEqual(versionLabel.c_str(), APP_VERSION) && versionLabel != APP_VERSION)
             listItem->setValueColor(tsl::onTextColor);
     
-        listItem->setClickListener([this, listItem, title](uint64_t keys) {
+        listItem->setClickListener([this, listItem](uint64_t keys) {
             static bool executingCommands = false;
             if (runningInterpreter.load(acquire)) {
                 return false;
             } else {
-                if (executingCommands && commandSuccess.load(acquire) && title != UPDATE_LANGUAGES) {
+                if (executingCommands && commandSuccess.load(acquire)) {
                     softwareHasUpdated = true;
                     triggerMenuReload = true;
                 }
                 executingCommands = false;
             }
-    
-            if (!(keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
+        
+            if (!(keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK)))
                 return false;
-            }
-    
+            
             executingCommands = true;
             isDownloadCommand.store(true, release);
-            
-            std::vector<std::vector<std::string>> interpreterCommands = {
-                {"try:"}
+        
+            const bool disableLoaderUpdate = isFile(FLAGS_PATH + "NO_LOADER_UPDATES.flag");
+            const std::string latestVersion = cleanVersionLabel(parseValueFromIniSection(SETTINGS_PATH + "RELEASE.ini", "Release Info", "latest_version"));
+            const std::string dlSounds = DOWNLOADS_PATH + "sounds/";
+            const std::string dlLoader = DOWNLOADS_PATH + "420000000007E51A/";
+            static constexpr const char* atmLoader = "/atmosphere/contents/420000000007E51A/";
+        
+            std::vector<std::vector<std::string>> cmds = {{"try:"}};
+        
+            auto addBackup = [&]() {
+                cmds.push_back({"delete", dlSounds});
+                cmds.push_back({"cp", LOADED_SOUNDS_PATH, dlSounds});
+                if (disableLoaderUpdate) {
+                    cmds.push_back({"delete", dlLoader});
+                    cmds.push_back({"cp", atmLoader, dlLoader});
+                }
             };
-    
-            // === UPDATE_ULTRAHAND case ===
-            if (title == UPDATE_ULTRAHAND) {
-                const bool disableLoaderUpdate = isFile(FLAGS_PATH+"NO_LOADER_UPDATES.flag");
-                const bool disableSoundEffectsUpdate = isFile(FLAGS_PATH+"NO_SOUND_EFFECTS_UPDATES.flag");
-                const std::string versionLabel = cleanVersionLabel(parseValueFromIniSection((SETTINGS_PATH+"RELEASE.ini"), "Release Info", "latest_version"));
-                
-                // Lambda to add backup/restore commands
-                auto addBackupCommands = [&]() {
-                    if (disableSoundEffectsUpdate) {
-                        interpreterCommands.push_back({"delete", DOWNLOADS_PATH+"sounds/"});
-                        interpreterCommands.push_back({"cp", SOUNDS_PATH, DOWNLOADS_PATH+"sounds/"});
-                    }
-                    if (disableLoaderUpdate) {
-                        interpreterCommands.push_back({"delete", DOWNLOADS_PATH+"420000000007E51A/"});
-                        interpreterCommands.push_back({"cp", "/atmosphere/contents/420000000007E51A/", DOWNLOADS_PATH+"420000000007E51A/"});
-                    }
-                };
-                
-                auto addRestoreAndLoaderCommands = [&]() {
-                    if (disableSoundEffectsUpdate) {
-                        interpreterCommands.push_back({"mv", DOWNLOADS_PATH+"sounds/", SOUNDS_PATH});
-                    }
-                    if (disableLoaderUpdate) {
-                        interpreterCommands.push_back({"mv", DOWNLOADS_PATH+"420000000007E51A/", "/atmosphere/contents/420000000007E51A/"});
-                    } else if (!isVersionGreaterOrEqual(amsVersion,"1.8.0")) {
-                        interpreterCommands.push_back({"download", OLD_NX_OVLLOADER_ZIP_URL, DOWNLOADS_PATH});
-                        interpreterCommands.push_back({"unzip", DOWNLOADS_PATH + "nx-ovlloader.zip", ROOT_PATH});
-                        interpreterCommands.push_back({"delete", DOWNLOADS_PATH + "nx-ovlloader.zip"});
-                    }
-                };
-                
-                auto addVersionUpdate = [&]() {
-                    if (!versionLabel.empty()) {
-                        interpreterCommands.push_back({"set-json-val", HB_APPSTORE_JSON, "version", versionLabel});
-                    }
-                };
-                
-                // Try #1: Update via update.ini
-                interpreterCommands.push_back({"delete", DOWNLOADS_PATH+"update.ini"});
-                interpreterCommands.push_back({"download-no-retry", LATEST_UPDATER_INI_URL, DOWNLOADS_PATH}); // if fails, move to next try
-                addBackupCommands();
-                interpreterCommands.push_back({"exec", "update", DOWNLOADS_PATH+"update.ini"});
-                interpreterCommands.push_back({"delete", DOWNLOADS_PATH+"update.ini"});
-                addRestoreAndLoaderCommands();
-                addVersionUpdate();
-                
-                // Try #2: Update via sdout.zip
-                interpreterCommands.push_back({"try:"});
-                interpreterCommands.push_back({"delete", DOWNLOADS_PATH+"sdout.zip"});
-                interpreterCommands.push_back({"download", ULTRAHAND_REPO_URL + "releases/latest/download/sdout.zip", DOWNLOADS_PATH});
-                addBackupCommands();
-                interpreterCommands.push_back({"unzip", DOWNLOADS_PATH+"sdout.zip", ROOT_PATH});
-                interpreterCommands.push_back({"delete", DOWNLOADS_PATH+"sdout.zip"});
-                addRestoreAndLoaderCommands();
-                addVersionUpdate();
-            } 
-            // === UPDATE_LANGUAGES case ===
-            else if (title == UPDATE_LANGUAGES) {
-                interpreterCommands.push_back({"delete", DOWNLOADS_PATH+"lang.zip"});
-                interpreterCommands.push_back({"download", ULTRAHAND_REPO_URL + "releases/latest/download/lang.zip", DOWNLOADS_PATH});
-                interpreterCommands.push_back({"unzip", DOWNLOADS_PATH+"lang.zip", LANG_PATH});
-                interpreterCommands.push_back({"delete", DOWNLOADS_PATH+"lang.zip"});
-            }
-    
+        
+            auto addRestore = [&]() {
+                cmds.push_back({"mv", dlSounds, LOADED_SOUNDS_PATH});
+                if (disableLoaderUpdate)
+                    cmds.push_back({"mv", dlLoader, atmLoader});
+                if (!latestVersion.empty())
+                    cmds.push_back({"set-json-val", HB_APPSTORE_JSON, "version", latestVersion});
+            };
+        
+            // Try #1: update.ini
+            const std::string updateIni = DOWNLOADS_PATH + "update.ini";
+            cmds.push_back({"delete", updateIni});
+            cmds.push_back({"download-no-retry", LATEST_UPDATER_INI_URL, DOWNLOADS_PATH});
+            addBackup();
+            cmds.push_back({"exec", "update", updateIni});
+            cmds.push_back({"delete", updateIni});
+            addRestore();
+        
+            // Try #2: sdout.zip
+            const std::string sdoutZip = DOWNLOADS_PATH + "sdout.zip";
+            cmds.push_back({"try:"});
+            cmds.push_back({"delete", sdoutZip});
+            cmds.push_back({"download", ULTRAHAND_REPO_URL + "releases/latest/download/sdout.zip", DOWNLOADS_PATH});
+            addBackup();
+            cmds.push_back({"unzip", sdoutZip, ROOT_PATH});
+            cmds.push_back({"delete", sdoutZip});
+            addRestore();
+        
             runningInterpreter.store(true, release);
-            executeInterpreterCommands(std::move(interpreterCommands), "", "");
+            executeInterpreterCommands(std::move(cmds), "", "");
             listItem->disableClickAnimation();
             listItem->setValue(INPROGRESS_SYMBOL);
             lastSelectedListItem = listItem;
-            shiftItemFocus(listItem);
+            tsl::shiftItemFocus(listItem);
             lastRunningInterpreter.store(true, std::memory_order_release);
             if (lastSelectedListItem)
                 lastSelectedListItem->triggerClickAnimation();
@@ -879,6 +861,8 @@ private:
                 } else {
                     Audio::exit();
                 }
+            } else if (iniKey == "clean_version_labels") {
+                returnJumpItemValue = cleanVersionLabel(returnJumpItemValue);
             }
 
             state = !state;
@@ -900,6 +884,10 @@ public:
     ~UltrahandSettingsMenu() {
         lastSelectedListItemFooter = "";
         //tsl::elm::clearFrameCache();
+        if (dropdownSelection == "softwareUpdateMenu") {
+            devImageData.clear();
+            devImageData.shrink_to_fit();
+        }
     }
 
     virtual tsl::elm::Element* createUI() override {
@@ -923,10 +911,11 @@ public:
             auto sectionIt = ultrahandIniData.find(ULTRAHAND_PROJECT_NAME);
             
             // Extract all values with defaults
-            std::string defaultLang = "";
-            std::string keyCombo = "";
-            std::string currentTheme = "";
-            std::string currentWallpaper = "";
+            std::string defaultLang;
+            std::string keyCombo;
+            std::string currentTheme;
+            std::string currentSounds;
+            std::string currentWallpaper;
             
             if (sectionIt != ultrahandIniData.end()) {
                 auto langIt = sectionIt->second.find(DEFAULT_LANG_STR);
@@ -944,6 +933,13 @@ public:
                     currentTheme = themeIt->second;
                 }
                 
+                if (!limitedMemory) {
+                    auto soundsIt = sectionIt->second.find("current_sounds");
+                    if (soundsIt != sectionIt->second.end()) {
+                        currentSounds = soundsIt->second;
+                    }
+                }
+
                 if (expandedMemory) {
                     auto wallpaperIt = sectionIt->second.find("current_wallpaper");
                     if (wallpaperIt != sectionIt->second.end()) {
@@ -958,6 +954,14 @@ public:
             keyCombo = keyCombo.empty() ? defaultCombos[0] : keyCombo;
             convertComboToUnicode(keyCombo);
             currentTheme = (currentTheme.empty() || currentTheme == DEFAULT_STR) ? DEFAULT : currentTheme;
+
+            if (!limitedMemory) {
+                if (isFileOrDirectory(LOADED_SOUNDS_PATH))
+                    currentSounds = currentSounds.empty() ? DEFAULT_STR : currentSounds;
+                else
+                    currentSounds = currentSounds.empty() ? OPTION_SYMBOL : currentSounds;
+            }
+
             if (expandedMemory) {
                 currentWallpaper = (currentWallpaper.empty() || currentWallpaper == OPTION_SYMBOL) ? OPTION_SYMBOL : currentWallpaper;
             }
@@ -968,13 +972,16 @@ public:
             addListItem(list, SOFTWARE_UPDATE, DROPDOWN_SYMBOL, "softwareUpdateMenu");
             addHeader(list, UI_SETTINGS);
             addListItem(list, THEME, currentTheme, "themeMenu");
+            if (!limitedMemory) {
+                addListItem(list, SOUNDS, currentSounds, "soundsMenu");
+            }
             if (expandedMemory) {
                 addListItem(list, WALLPAPER, currentWallpaper, "wallpaperMenu");
             }
             addListItem(list, WIDGET, DROPDOWN_SYMBOL, "widgetMenu");
             addListItem(list, MISCELLANEOUS, DROPDOWN_SYMBOL, "miscMenu");
 
-            addGap(list, 12);
+            //addGap(list, 12);
 
         } else if (dropdownSelection == KEY_COMBO_STR) {
             addHeader(list, KEY_COMBO);
@@ -1027,9 +1034,19 @@ public:
                         if (selectedListItem)
                             selectedListItem->setValue(defaultLangMode);
                         listItem->setValue(defaultLangMode + " " + CHECKMARK_SYMBOL);
+
+                        // Reload font if CJK language is selected
+                        //if (defaultLangMode == "zh-cn") {
+                        //    tsl::gfx::Renderer::get().loadLocalFont(PlSharedFontType_ChineseSimplified);
+                        //} else if (defaultLangMode == "zh-tw") {
+                        //    tsl::gfx::Renderer::get().loadLocalFont(PlSharedFontType_ChineseTraditional);
+                        //} else if (defaultLangMode == "ko") {
+                        //    tsl::gfx::Renderer::get().loadLocalFont(PlSharedFontType_KO);
+                        //}
+
                         //lastSelectedListItem = nullptr;
                         lastSelectedListItem = listItem;
-                        shiftItemFocus(listItem);
+                        tsl::shiftItemFocus(listItem);
                         //if (lastSelectedListItem)
                         //    lastSelectedListItem->triggerClickAnimation();
                         lastSelectedListItemFooter = defaultLangMode;
@@ -1054,20 +1071,31 @@ public:
                 tsl::notification->showNow(NOTIFY_HEADER + NEW_UPDATE_IS_AVAILABLE);
             
             }
-
+            
             addHeader(list, SOFTWARE_UPDATE);
             addUpdateButton(list, UPDATE_ULTRAHAND, fullVersionLabel);
-            addUpdateButton(list, UPDATE_LANGUAGES, fullVersionLabel);
-
+            //addUpdateButton(list, UPDATE_LANGUAGES, fullVersionLabel);
+            
             PackageHeader overlayHeader;
             overlayHeader.title = "Ultrahand Overlay";
             overlayHeader.version = APP_VERSION;
             overlayHeader.creator = "ppkantorski";
-            overlayHeader.about = "Ultrahand Overlay is a versatile tool that enables you to create and share custom command-based packages.";
-            overlayHeader.credits = "Special thanks to B3711, ComplexNarrative, ssky, MasaGratoR, meha, WerWolv, HookedBehemoth and many others. ♥";
-            addPackageInfo(list, overlayHeader, OVERLAY_STR);
+            overlayHeader.about = ULTRAHAND_ABOUT;
+            overlayHeader.credits = ULTRAHAND_CREDITS_START+"WerWolv, HookedBehemoth, B3711, ComplexNarrative, ssky, MasaGratoR, meha,"+ULTRAHAND_CREDITS_END;
+
+            std::string defaultLang = parseValueFromIniSection(ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, DEFAULT_LANG_STR);
+            if (defaultLang.empty()) {
+                defaultLang = "en";
+            }
+
+            addPackageInfo(list, overlayHeader, OVERLAY_STR, defaultLang);
             overlayHeader.clear();
-        
+
+            if (loadDevImages()) {
+                creatorStartTick = nextBlinkTick = blinkEndTick = 0;
+                creatorAnimDone = false;
+                list->addItem(new tsl::elm::CustomDrawer([](tsl::gfx::Renderer* renderer, u16, u16, u16, u16){drawDevImage(renderer);}));
+            }
         } else if (dropdownSelection == "systemMenu") {
             
             // Version info formatting - stack allocated, optimal size
@@ -1341,8 +1369,10 @@ public:
                     if (!isHolding) {
                         isHolding = true;
                         runningInterpreter.store(true, release);
+                        lastSelectedListItemFooter = exitItem->getValue();
                         exitItem->setValue(INPROGRESS_SYMBOL);
                         lastSelectedListItem = exitItem;
+
                         // Use touch hold start tick if available, otherwise use current tick
                         //if (exitItem->isTouchHolding()) {
                         //    holdStartTick = exitItem->getTouchHoldStartTick();
@@ -1363,8 +1393,6 @@ public:
             //tableData.clear();
             //tableData = {{"", "", REBOOT_REQUIRED}};
             //addTable(list, tableData, "", 164, 28, 0, 0, DEFAULT_STR, DEFAULT_STR, DEFAULT_STR, RIGHT_STR, true);
-        
-                
         } else if (dropdownSelection == "themeMenu") {
             addHeader(list, THEME);
             std::string currentTheme = parseValueFromIniSection(ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, "current_theme");
@@ -1395,7 +1423,7 @@ public:
                     listItem->setValue(CHECKMARK_SYMBOL);
                     //lastSelectedListItem = nullptr;
                     lastSelectedListItem = listItem;
-                    shiftItemFocus(listItem);
+                    tsl::shiftItemFocus(listItem);
                     if (lastSelectedListItem)
                         lastSelectedListItem->triggerClickAnimation();
                     themeWasChanged = true;
@@ -1414,7 +1442,7 @@ public:
                 dropExtension(themeName);
                 if (themeName == DEFAULT_STR) continue;
 
-                tsl::elm::ListItem* listItem = new tsl::elm::ListItem(themeName);
+                listItem = new tsl::elm::ListItem(themeName);
                 if (themeName == currentTheme) {
                     listItem->setValue(CHECKMARK_SYMBOL);
                     //lastSelectedListItem = nullptr;
@@ -1438,7 +1466,7 @@ public:
                         listItem->setValue(CHECKMARK_SYMBOL);
                         //lastSelectedListItem = nullptr;
                         lastSelectedListItem = listItem;
-                        shiftItemFocus(listItem);
+                        tsl::shiftItemFocus(listItem);
                         if (lastSelectedListItem)
                             lastSelectedListItem->triggerClickAnimation();
                         themeWasChanged = true;
@@ -1448,6 +1476,92 @@ public:
                 });
                 list->addItem(listItem);
             }
+            filesList.clear();
+            filesList.shrink_to_fit();
+        } else if (dropdownSelection == "soundsMenu") {
+            addHeader(list, SOUNDS);
+            std::string currentSounds = parseValueFromIniSection(ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, "current_sounds");
+            if (currentSounds.empty()) {
+                if (isFile(SOUNDS_PATH + "default.zip") && ult::Audio::allSoundsExist())
+                    currentSounds = DEFAULT_STR;
+                else
+                    currentSounds = OPTION_SYMBOL;
+            }
+            auto* listItem = new tsl::elm::ListItem(OPTION_SYMBOL);
+            if (currentSounds == OPTION_SYMBOL) {
+                listItem->setValue(CHECKMARK_SYMBOL);
+                lastSelectedListItem = listItem;
+            }
+            listItem->setClickListener([listItem](uint64_t keys) {
+                if (runningInterpreter.load(acquire)) return false;
+        
+                if ((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
+                    setIniFileValue(ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, "current_sounds", OPTION_SYMBOL);
+                    deleteFileOrDirectoryByPattern(LOADED_SOUNDS_PATH+"*.wav");
+                    ult::Audio::unloadAllSounds({});
+
+                    setIniFileValue(ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, "sound_effects", FALSE_STR);
+                    useSoundEffects = false;
+                    
+                    if (lastSelectedListItem) lastSelectedListItem->setValue("");
+                    if (selectedListItem) selectedListItem->setValue(OPTION_SYMBOL);
+                    listItem->setValue(CHECKMARK_SYMBOL);
+                    lastSelectedListItem = listItem;
+                    tsl::shiftItemFocus(listItem);
+                    if (lastSelectedListItem) lastSelectedListItem->triggerClickAnimation();
+                    return true;
+                }
+                return false;
+            });
+            list->addItem(listItem);
+        
+            filesList = getFilesListByWildcards(SOUNDS_PATH + "*.zip");
+            std::sort(filesList.begin(), filesList.end());
+        
+            for (auto it = filesList.begin(); it != filesList.end(); ++it) {
+                if (getNameFromPath(*it) == "default.zip") {
+                    std::swap(*it, filesList.front());
+                    break;
+                }
+            }
+        
+            std::string soundsName;
+            for (const auto& soundsFile : filesList) {
+                soundsName = getNameFromPath(soundsFile);
+                dropExtension(soundsName);
+        
+                tsl::elm::ListItem* listItem = new tsl::elm::ListItem(soundsName);
+                if (soundsName == currentSounds) {
+                    listItem->setValue(CHECKMARK_SYMBOL);
+                    lastSelectedListItem = listItem;
+                }
+                listItem->setClickListener([soundsName, soundsFile, listItem](uint64_t keys) {
+                    if (runningInterpreter.load(acquire)) return false;
+        
+                    if ((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
+                        setIniFileValue(ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, "current_sounds", soundsName);
+                        deleteFileOrDirectoryByPattern(LOADED_SOUNDS_PATH+"*.wav");
+                        unzipFile(soundsFile, LOADED_SOUNDS_PATH);
+                        
+                        setIniFileValue(ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, "sound_effects", TRUE_STR);
+                        useSoundEffects = true;
+                        reloadSoundCacheNow.store(true, std::memory_order_release);
+
+                        if (lastSelectedListItem) lastSelectedListItem->setValue("");
+                        if (selectedListItem) selectedListItem->setValue(soundsName);
+                        listItem->setValue(CHECKMARK_SYMBOL);
+                        lastSelectedListItem = listItem;
+                        tsl::shiftItemFocus(listItem);
+                        if (lastSelectedListItem) lastSelectedListItem->triggerClickAnimation();
+                        return true;
+                    }
+                    return false;
+                });
+                list->addItem(listItem);
+            }
+        
+            filesList.clear();
+            filesList.shrink_to_fit();
         } else if (dropdownSelection == "wallpaperMenu") {
             addHeader(list, WALLPAPER);
             std::string currentWallpaper = parseValueFromIniSection(ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, "current_wallpaper");
@@ -1475,7 +1589,7 @@ public:
                     listItem->setValue(CHECKMARK_SYMBOL);
                     //lastSelectedListItem = nullptr;
                     lastSelectedListItem = listItem;
-                    shiftItemFocus(listItem);
+                    tsl::shiftItemFocus(listItem);
                     if (lastSelectedListItem)
                         lastSelectedListItem->triggerClickAnimation();
                     return true;
@@ -1493,7 +1607,7 @@ public:
                 dropExtension(wallpaperName);
                 if (wallpaperName == DEFAULT_STR) continue;
 
-                tsl::elm::ListItem* listItem = new tsl::elm::ListItem(wallpaperName);
+                listItem = new tsl::elm::ListItem(wallpaperName);
                 if (wallpaperName == currentWallpaper) {
                     listItem->setValue(CHECKMARK_SYMBOL);
                     //lastSelectedListItem = nullptr;
@@ -1515,7 +1629,7 @@ public:
                         listItem->setValue(CHECKMARK_SYMBOL);
                         //lastSelectedListItem = nullptr;
                         lastSelectedListItem = listItem;
-                        shiftItemFocus(listItem);
+                        tsl::shiftItemFocus(listItem);
                         if (selectedListItem)
                             lastSelectedListItem->triggerClickAnimation();
                         return true;
@@ -1524,6 +1638,8 @@ public:
                 });
                 list->addItem(listItem);
             }
+            filesList.clear();
+            filesList.shrink_to_fit();
         } else if (dropdownSelection == "widgetMenu") {
             addHeader(list, WIDGET_ITEMS);
             createToggleListItem(list, CLOCK, hideClock, "hide_clock", true);
@@ -1550,17 +1666,19 @@ public:
             addHeader(list, FEATURES);
             useLaunchCombos = getBoolValue("launch_combos", true); // TRUE_STR default
             createToggleListItem(list, LAUNCH_COMBOS, useLaunchCombos, "launch_combos");
+
+            useHapticFeedback = getBoolValue("haptic_feedback", false); // FALSE_STR default
+            createToggleListItem(list, HAPTIC_FEEDBACK, useHapticFeedback, "haptic_feedback");
+
             useStartupNotification = getBoolValue("startup_notification", true); // TRUE_STR default
             createToggleListItem(list, STARTUP_NOTIFICATION, useStartupNotification, "startup_notification");
             useNotifications = getBoolValue("notifications", true); // TRUE_STR default
             createToggleListItem(list, EXTERNAL_NOTIFICATIONS, useNotifications, "notifications");
 
-            if (!ult::limitedMemory) {
-                useSoundEffects = getBoolValue("sound_effects", false); // TRUE_STR default
-                createToggleListItem(list, SOUND_EFFECTS, useSoundEffects, "sound_effects");
-            }
-            useHapticFeedback = getBoolValue("haptic_feedback", false); // FALSE_STR default
-            createToggleListItem(list, HAPTIC_FEEDBACK, useHapticFeedback, "haptic_feedback");
+            //if (!ult::limitedMemory) {
+            //    useSoundEffects = getBoolValue("sound_effects", false); // TRUE_STR default
+            //    createToggleListItem(list, SOUND_EFFECTS, useSoundEffects, "sound_effects");
+            //}
             useOpaqueScreenshots = getBoolValue("opaque_screenshots", true); // TRUE_STR default
             createToggleListItem(list, OPAQUE_SCREENSHOTS, useOpaqueScreenshots, "opaque_screenshots");
             useSwipeToOpen = getBoolValue("swipe_to_open", true); // TRUE_STR default
@@ -1613,12 +1731,13 @@ public:
 
             //addHeader(list, "Version Labels");
 
-        } else {
-            addBasicListItem(list, FAILED_TO_OPEN + ": " + settingsIniPath);
+        //} else {
+        //    addBasicListItem(list, FAILED_TO_OPEN + ": " + settingsIniPath);
         }
 
         auto* rootFrame = new tsl::elm::OverlayFrame(CAPITAL_ULTRAHAND_PROJECT_NAME, versionLabel);
-        if (inSubSettingsMenu && ((dropdownSelection == "languageMenu") || (dropdownSelection == KEY_COMBO_STR) || (dropdownSelection == "themeMenu") || (dropdownSelection == "wallpaperMenu"))) {
+        if (inSubSettingsMenu && ((dropdownSelection == "languageMenu") || (dropdownSelection == KEY_COMBO_STR) ||
+            (dropdownSelection == "themeMenu") || (dropdownSelection == "soundsMenu") || (dropdownSelection == "wallpaperMenu"))) {
             {
                 //std::lock_guard<std::mutex> lock(jumpItemMutex);
                 jumpItemName = "";
@@ -1676,7 +1795,7 @@ public:
                     ult::launchingOverlay.store(true, std::memory_order_release);
                     tsl::Overlay::get()->close();
                 }
-            });
+            }, nullptr, true);  // <-- resetStoredCommands = true
         }
 
         const bool isRunningInterp = runningInterpreter.load(acquire);
@@ -1929,7 +2048,7 @@ public:
                     selectedListItem->setValue(iStr);
                 listItem->setValue(CHECKMARK_SYMBOL);
                 lastSelectedListItem = listItem;
-                shiftItemFocus(listItem);
+                tsl::shiftItemFocus(listItem);
                 if (lastSelectedListItem)
                     lastSelectedListItem->triggerClickAnimation();
             }
@@ -1999,7 +2118,7 @@ public:
                 if (runningInterpreter.load(acquire)) return false;
                 if ((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
                     inMainMenu.store(false, std::memory_order_release);
-                    shiftItemFocus(item);
+                    tsl::shiftItemFocus(item);
                     tsl::changeTo<SettingsMenu>(name, mode, overlayName, overlayVersion, selection);
                     selectedListItem = item;
                     if (lastSelectedListItem) lastSelectedListItem->triggerClickAnimation();
@@ -2089,7 +2208,7 @@ public:
                         if ((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
                             inMainMenu.store(false, std::memory_order_release);
 
-                            shiftItemFocus(item);
+                            tsl::shiftItemFocus(item);
                             tsl::changeTo<SettingsMenu>(entryName, OVERLAY_STR, mode, "", "mode_combo_" + std::to_string(i));
                             selectedListItem = item;
                             if (lastSelectedListItem) lastSelectedListItem->triggerClickAnimation();
@@ -2143,7 +2262,7 @@ public:
                         if (selectedListItem) selectedListItem->setValue(OPTION_SYMBOL);
                         item->setValue(CHECKMARK_SYMBOL);
                         lastSelectedListItem = item;
-                        shiftItemFocus(item);
+                        tsl::shiftItemFocus(item);
                         if (lastSelectedListItem) lastSelectedListItem->triggerClickAnimation();
                         return true;
                     }
@@ -2178,7 +2297,7 @@ public:
                         if (selectedListItem) selectedListItem->setValue(mapped);
                         item->setValue(CHECKMARK_SYMBOL);
                         lastSelectedListItem = item;
-                        shiftItemFocus(item);
+                        tsl::shiftItemFocus(item);
                         if (lastSelectedListItem) lastSelectedListItem->triggerClickAnimation();
                         return true;
                     }
@@ -2229,7 +2348,7 @@ public:
                         if (selectedListItem) selectedListItem->setValue(OPTION_SYMBOL);
                         item->setValue(CHECKMARK_SYMBOL);
                         lastSelectedListItem = item;
-                        shiftItemFocus(item);
+                        tsl::shiftItemFocus(item);
                         if (lastSelectedListItem) lastSelectedListItem->triggerClickAnimation();
                         return true;
                     }
@@ -2268,7 +2387,7 @@ public:
                         if (selectedListItem) selectedListItem->setValue(mapped);
                         item->setValue(CHECKMARK_SYMBOL);
                         lastSelectedListItem = item;
-                        shiftItemFocus(item);
+                        tsl::shiftItemFocus(item);
                         if (lastSelectedListItem) lastSelectedListItem->triggerClickAnimation();
                         return true;
                     }
@@ -2571,10 +2690,10 @@ public:
 
 
 // For persistent versions and colors across nested packages (when not specified)
-std::string packageRootLayerTitle;
-std::string packageRootLayerName;
-std::string packageRootLayerVersion;
-std::string packageRootLayerColor;
+//std::string packageRootLayerTitle;
+//std::string packageRootLayerName;
+//std::string packageRootLayerVersion;
+//std::string packageRootLayerColor;
 //bool packageRootLayerIsStarred = false;
 
 //std::string lastPackageHeader;
@@ -2949,7 +3068,8 @@ private:
     std::string specifiedFooterKey;
     bool toggleState = false;
     std::string packageConfigIniPath;
-    std::string commandSystem, commandMode, commandGrouping;
+    //std::string commandSystem, commandMode, commandGrouping;
+    std::string commandMode, commandGrouping;
 
     std::string lastPackageHeader;
 
@@ -3085,12 +3205,12 @@ public:
                 (!inEristaSection && !inMarikoSection)) {
                 
                 // Optimized pattern matching with bounds checking
-                if (commandName.size() > SYSTEM_PATTERN_LEN && 
-                    commandName.compare(0, SYSTEM_PATTERN_LEN, SYSTEM_PATTERN) == 0) {
-                    commandSystem.assign(commandName, SYSTEM_PATTERN_LEN, commandName.size() - SYSTEM_PATTERN_LEN);
-                    if (std::find(commandSystems.begin(), commandSystems.end(), commandSystem) == commandSystems.end())
-                        commandSystem = commandSystems[0];
-                } else if (commandName.size() > MODE_PATTERN_LEN && 
+                //if (commandName.size() > SYSTEM_PATTERN_LEN && 
+                //    commandName.compare(0, SYSTEM_PATTERN_LEN, SYSTEM_PATTERN) == 0) {
+                //    commandSystem.assign(commandName, SYSTEM_PATTERN_LEN, commandName.size() - SYSTEM_PATTERN_LEN);
+                //    if (std::find(commandSystems.begin(), commandSystems.end(), commandSystem) == commandSystems.end())
+                //        commandSystem = commandSystems[0];
+                if (commandName.size() > MODE_PATTERN_LEN && 
                            commandName.compare(0, MODE_PATTERN_LEN, MODE_PATTERN) == 0) {
                     commandMode = commandName.substr(MODE_PATTERN_LEN);
                     if (std::find(commandModes.begin(), commandModes.end(), commandMode) == commandModes.end())
@@ -3345,7 +3465,7 @@ public:
         auto* list = new tsl::elm::List();
         packageConfigIniPath = filePath + CONFIG_FILENAME;
     
-        commandSystem = commandSystems[0];
+        //commandSystem = commandSystems[0];
         commandMode = commandModes[0];
         commandGrouping = commandGroupings[0];
     
@@ -3778,7 +3898,7 @@ public:
                         lastSelectedListItem = listItem;
                         //lastFooterHighlight = commandFooterHighlight;  // STORE THE VALUE
                         //lastFooterHighlightDefined = commandFooterHighlightDefined;  // STORE WHETHER IT WAS DEFINED
-                        shiftItemFocus(listItem);
+                        tsl::shiftItemFocus(listItem);
     
                         lastRunningInterpreter.store(true, std::memory_order_release);
                         if (lastSelectedListItem)
@@ -3793,7 +3913,7 @@ public:
                         applyPlaceholderReplacementsToCommands(modifiedCmds, filePath);
                         //tsl::elm::g_cachedTop.disabled = true;
                         //tsl::elm::g_cachedBottom.disabled = true;
-                        shiftItemFocus(listItem);
+                        tsl::shiftItemFocus(listItem);
                         tsl::changeTo<ScriptOverlay>(std::move(modifiedCmds), filePath, itemName, "selection", false, currentPackageHeader, showWidget);
                         return true;
                     }
@@ -3906,7 +4026,7 @@ public:
                     applyPlaceholderReplacementsToCommands(modifiedCmds, filePath);
                     //tsl::elm::g_cachedTop.disabled = true;
                     //tsl::elm::g_cachedBottom.disabled = true;
-                    shiftItemFocus(toggleListItem);
+                    tsl::shiftItemFocus(toggleListItem);
                     tsl::changeTo<ScriptOverlay>(std::move(modifiedCmds), filePath, itemName, "selection", false, currentPackageHeader, showWidget);
                 });
     
@@ -4369,7 +4489,11 @@ bool drawCommandsMenu(
     bool commandFooterHighlight;
     bool commandFooterHighlightDefined;
     bool isHold;
+
     std::string commandSystem;
+    std::string commandState;
+    std::string commandHOSFirmware;
+    std::string commandAMSFirmware;
     std::string commandMode;
     std::string commandGrouping;
     
@@ -4427,6 +4551,7 @@ bool drawCommandsMenu(
     std::string lastPackageHeader;
 
     bool isMini;
+    const bool isDocked = ult::consoleIsDocked();
 
     // update general placeholders
     updateGeneralPlaceholders();
@@ -4484,13 +4609,16 @@ bool drawCommandsMenu(
         maxValue = 100;
         units = "";
         steps = 0;
-        unlockedTrackbar = true;
+        unlockedTrackbar = false;
         onEveryTick = false;
         commandFooter = "";
         commandFooterHighlight = false;
         commandFooterHighlightDefined = false;
         isHold = false;
         commandSystem = DEFAULT_STR;
+        commandState = DEFAULT_STR;
+        commandHOSFirmware = "";
+        commandAMSFirmware = "";
         commandMode = DEFAULT_STR;
         commandGrouping = DEFAULT_STR;
         
@@ -4638,7 +4766,7 @@ bool drawCommandsMenu(
                             }
                     
                             // Load footer_highlight from config INI if it exists
-                            auto footerHighlightIt = optionIt->second.find("footer_highlight");
+                            auto footerHighlightIt = optionIt->second.find(FOOTER_HIGHLIGHT_STR);
                             if (footerHighlightIt != optionIt->second.end()) {
                                 commandFooterHighlight = (footerHighlightIt->second == TRUE_STR);
                                 commandFooterHighlightDefined = true;
@@ -4708,7 +4836,7 @@ bool drawCommandsMenu(
                                     
                                     //auto options = loadOptionsFromIni(packageIniPath);
                                     // Pass all gathered commands to the ScriptOverlay
-                                    shiftItemFocus(listItem);
+                                    tsl::shiftItemFocus(listItem);
                                     tsl::changeTo<ScriptOverlay>(std::move(gatherPromptCommands(optionName, std::move(loadOptionsFromIni(packageIniPath)))), packagePath, optionName, "package", true, lastPackageHeader, showWidget);
                                     return true;
                                 }
@@ -4727,7 +4855,7 @@ bool drawCommandsMenu(
                                 if ((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
                                     inPackageMenu = false;
 
-                                    shiftItemFocus(listItem);
+                                    tsl::shiftItemFocus(listItem);
                                     tsl::changeTo<MainMenu>("", optionName);
                                     return true;
                                 } else if (keys & SCRIPT_KEY && !(keys & ~SCRIPT_KEY & ALL_KEYS_MASK)) {
@@ -4740,7 +4868,7 @@ bool drawCommandsMenu(
                                     //const std::vector<std::vector<std::string>> promptCommands = gatherPromptCommands(optionName, options);
                                     //auto options = loadOptionsFromIni(packageIniPath)
 
-                                    shiftItemFocus(listItem);
+                                    tsl::shiftItemFocus(listItem);
                                     tsl::changeTo<ScriptOverlay>(std::move(gatherPromptCommands(optionName, std::move(loadOptionsFromIni(packageIniPath)))), PACKAGE_PATH, optionName, "main", true, lastPackageHeader, showWidget);
                                     return true;
                                 } else if (keys & SYSTEM_SETTINGS_KEY && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
@@ -4846,6 +4974,11 @@ bool drawCommandsMenu(
                                         commandSystem = commandSystems[0];
                                     continue;
                                 }
+                                if (commandName.compare(0, STATE_PATTERN_LEN, STATE_PATTERN) == 0) {
+                                    commandState = commandName.substr(STATE_PATTERN_LEN);
+                                    continue;
+                                }
+
                                 if (commandName.compare(0, SCROLLABLE_PATTERN_LEN, SCROLLABLE_PATTERN) == 0) {
                                     switch (commandName[SCROLLABLE_PATTERN_LEN]) {
                                         case 't':
@@ -4961,6 +5094,10 @@ bool drawCommandsMenu(
                                 break;
                                 
                             case 'h':
+                                if (commandName.compare(0, HOS_VERSION_PATTERN_LEN, HOS_VERSION_PATTERN) == 0) {
+                                    commandHOSFirmware = commandName.substr(HOS_VERSION_PATTERN_LEN);
+                                    continue;
+                                }
                                 if (commandName.compare(0, HOLD_PATTERN_LEN, HOLD_PATTERN) == 0) {
                                     switch (commandName[HOLD_PATTERN_LEN]) {
                                         case 't':
@@ -5114,6 +5251,10 @@ bool drawCommandsMenu(
                                 break;
                                 
                             case 'a':
+                                if (commandName.compare(0, AMS_VERSION_PATTERN_LEN, AMS_VERSION_PATTERN) == 0) {
+                                    commandAMSFirmware = commandName.substr(AMS_VERSION_PATTERN_LEN);
+                                    continue;
+                                }
                                 if (commandName.compare(0, ALIGNMENT_PATTERN_LEN, ALIGNMENT_PATTERN) == 0) {
                                     tableAlignment = commandName.substr(ALIGNMENT_PATTERN_LEN);
                                     continue;
@@ -5227,7 +5368,7 @@ bool drawCommandsMenu(
                 // Always try to load footer_highlight from config.ini if it exists
                 auto optionIt = packageConfigData.find(optionName);
                 if (optionIt != packageConfigData.end()) {
-                    auto footerHighlightIt = optionIt->second.find("footer_highlight");
+                    auto footerHighlightIt = optionIt->second.find(FOOTER_HIGHLIGHT_STR);
                     if (footerHighlightIt != optionIt->second.end() && !footerHighlightIt->second.empty()) {
                         // Load the non-empty value from config.ini
                         commandFooterHighlight = (footerHighlightIt->second == TRUE_STR);
@@ -5237,9 +5378,9 @@ bool drawCommandsMenu(
                 
                 // Only write footer_highlight back if it was defined in package INI but missing/empty in config
                 if (commandFooterHighlightDefined && optionIt != packageConfigData.end()) {
-                    auto it = optionIt->second.find("footer_highlight");
+                    auto it = optionIt->second.find(FOOTER_HIGHLIGHT_STR);
                     if (it == optionIt->second.end() || it->second.empty()) {
-                        packageConfigData[optionName]["footer_highlight"] = commandFooterHighlight ? TRUE_STR : FALSE_STR;
+                        packageConfigData[optionName][FOOTER_HIGHLIGHT_STR] = commandFooterHighlight ? TRUE_STR : FALSE_STR;
                         shouldSaveINI = true;
                     }
                 }
@@ -5258,7 +5399,7 @@ bool drawCommandsMenu(
                 }
                 // Only add footer_highlight if it was defined in package INI
                 if (commandFooterHighlightDefined) {
-                    packageConfigData[optionName]["footer_highlight"] = commandFooterHighlight ? TRUE_STR : FALSE_STR;
+                    packageConfigData[optionName][FOOTER_HIGHLIGHT_STR] = commandFooterHighlight ? TRUE_STR : FALSE_STR;
                 }
                 
                 // Save the config file once
@@ -5296,13 +5437,21 @@ bool drawCommandsMenu(
                 skipSystem = true;
             } else if (commandSystem == MARIKO_STR && !usingMariko) {
                 skipSystem = true;
+            } else if (commandState == DOCKED_STR && !isDocked) {
+                skipSystem = true;
+            } else if (commandState == HANDHELD_STR && isDocked) {
+                skipSystem = true;
+            } else if (!commandHOSFirmware.empty() && !checkVersionCondition(commandHOSFirmware, hosVersion)) {
+                skipSystem = true;
+            } else if (!commandAMSFirmware.empty() && !checkVersionCondition(commandAMSFirmware, amsVersion)) {
+                skipSystem = true;
             }
             
             if (!skipSection && !skipSystem) { // for skipping the drawing of sections
                 if (commandMode == TABLE_STR) {
                     if (useHeaderIndent) {
                         tableColumnOffset = 164;
-                        tableStartGap = tableEndGap = 19-2; // for perfect alignment for header tables
+                        tableStartGap = tableEndGap = 17; // for perfect alignment for header tables
                         isScrollableTable = false;
                         lastPackageHeader = getFirstSectionText(tableData, packagePath);
                     }
@@ -5374,7 +5523,7 @@ bool drawCommandsMenu(
                 
                         const bool isFromMainMenu = (packagePath == PACKAGE_PATH);
 
-                        shiftItemFocus(trackBar);
+                        tsl::shiftItemFocus(trackBar);
 
                         // Switch to ScriptOverlay
                         tsl::changeTo<ScriptOverlay>(std::move(modifiedCmds), packagePath, keyName, isFromMainMenu ? "main" : "package", false, lastPackageHeader, showWidget);
@@ -5434,7 +5583,7 @@ bool drawCommandsMenu(
                         // Apply placeholder replacements and switch to ScriptOverlay
                         applyPlaceholderReplacementsToCommands(modifiedCmds, packagePath);
 
-                        shiftItemFocus(stepTrackBar);
+                        tsl::shiftItemFocus(stepTrackBar);
 
                         tsl::changeTo<ScriptOverlay>(std::move(modifiedCmds), packagePath, keyName, isFromMainMenu ? "main" : "package", false, lastPackageHeader, showWidget);
                     });
@@ -5570,7 +5719,7 @@ bool drawCommandsMenu(
                         // Apply placeholder replacements and switch to ScriptOverlay
                         applyPlaceholderReplacementsToCommands(modifiedCmds, packagePath);
 
-                        shiftItemFocus(namedStepTrackBar);
+                        tsl::shiftItemFocus(namedStepTrackBar);
 
                         tsl::changeTo<ScriptOverlay>(std::move(modifiedCmds), packagePath, keyName, isFromMainMenu ? "main" : "package", false, lastPackageHeader, showWidget);
                     });
@@ -5677,7 +5826,7 @@ bool drawCommandsMenu(
                                 std::string selectionItem = keyName;
                                 removeTag(selectionItem);
 
-                                shiftItemFocus(listItem);
+                                tsl::shiftItemFocus(listItem);
 
                                 // add lines ;mode=forwarder and package_source 'forwarderPackagePath' to front of modifiedCmds
                                 tsl::changeTo<ScriptOverlay>(std::move(getSourceReplacement(commands, keyName, i, packagePath)), packagePath, selectionItem, isFromMainMenu ? "main" : "package", true, lastPackageHeader, showWidget);
@@ -5741,7 +5890,7 @@ bool drawCommandsMenu(
                                         //g_overlayFilename = "";
                                     }
 
-                                    shiftItemFocus(listItem);
+                                    tsl::shiftItemFocus(listItem);
 
                                     tsl::changeTo<SelectionOverlay>(packagePath, keyName, newKey, lastPackageHeader, commands, showWidget);
                                     //lastKeyName = keyName;
@@ -5766,7 +5915,7 @@ bool drawCommandsMenu(
                                 removeTag(selectionItem);
                                 auto modifiedCmds = commands;
                                 applyPlaceholderReplacementsToCommands(modifiedCmds, packagePath);
-                                shiftItemFocus(listItem);
+                                tsl::shiftItemFocus(listItem);
                                 tsl::changeTo<ScriptOverlay>(std::move(modifiedCmds), packagePath, selectionItem, isFromMainMenu ? "main" : "package", true, lastPackageHeader, showWidget);
                                 return true;
                             } else if ((packagePath == PACKAGE_PATH) && (keys & SYSTEM_SETTINGS_KEY) && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
@@ -5856,7 +6005,7 @@ bool drawCommandsMenu(
                                 lastSelectedListItem = listItem;
                                 lastFooterHighlight = commandFooterHighlight;  // STORE THE VALUE
                                 lastFooterHighlightDefined = commandFooterHighlightDefined;  // STORE WHETHER IT WAS DEFINED
-                                shiftItemFocus(listItem);
+                                tsl::shiftItemFocus(listItem);
                                 lastCommandMode = commandMode;
                                 lastKeyName = keyName;
 
@@ -5868,7 +6017,7 @@ bool drawCommandsMenu(
                                 const bool isFromMainMenu = (packagePath == PACKAGE_PATH);
                                 auto modifiedCmds = getSourceReplacement(commands, selectedItem, i, packagePath);
                                 applyPlaceholderReplacementsToCommands(modifiedCmds, packagePath);
-                                shiftItemFocus(listItem);
+                                tsl::shiftItemFocus(listItem);
                                 tsl::changeTo<ScriptOverlay>(std::move(modifiedCmds), packagePath, keyName, isFromMainMenu ? "main" : "package", false, lastPackageHeader, showWidget);
                                 return true;
                             } else if ((packagePath == PACKAGE_PATH) && (keys & SYSTEM_SETTINGS_KEY) && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
@@ -5953,7 +6102,7 @@ bool drawCommandsMenu(
 
                             applyPlaceholderReplacementsToCommands(modifiedCmds, packagePath);
 
-                            shiftItemFocus(toggleListItem);
+                            tsl::shiftItemFocus(toggleListItem);
                             tsl::changeTo<ScriptOverlay>(std::move(modifiedCmds), packagePath, keyName, isFromMainMenu ? "main" : "package", false, lastPackageHeader, showWidget);
                         });
 
@@ -6054,6 +6203,11 @@ public:
         if (returningToMain || returningToHiddenMain) {
             tsl::clearGlyphCacheNow.store(true, release);
             clearMemory();
+
+            {
+                std::unique_lock<std::shared_mutex> writeLock(tsl::gfx::s_translationCacheMutex);
+                ult::clearTranslationCache();
+            }
             
             packageRootLayerTitle = packageRootLayerVersion = packageRootLayerColor = "";
             overrideTitle = false;
@@ -6246,7 +6400,7 @@ public:
                                     footerIt->second.find(NULL_STR) == std::string::npos)
                                 {
                                     // Check if footer_highlight exists in the INI
-                                    auto footerHighlightIt = optionSection.find("footer_highlight");
+                                    auto footerHighlightIt = optionSection.find(FOOTER_HIGHLIGHT_STR);
                                     if (footerHighlightIt != optionSection.end()) {
                                         // Use the value from the INI
                                         bool footerHighlightFromIni = (footerHighlightIt->second == TRUE_STR);
@@ -6695,9 +6849,10 @@ public:
     };
 };
 
-
+bool triggerBootCommands = true;
 bool toPackages = false;
 bool inOverlay = false;
+
 /**
  * @brief The `MainMenu` class handles the main menu overlay functionality.
  *
@@ -6842,17 +6997,10 @@ public:
         
         std::vector<std::string> overlayFiles = getFilesListByWildcards(OVERLAY_PATH+"*.ovl");
         
-        #if !USING_FSTREAM_DIRECTIVE
         if (!isFile(OVERLAYS_INI_FILEPATH)) {
             FILE* createFile = fopen(OVERLAYS_INI_FILEPATH.c_str(), "w");
             if (createFile) fclose(createFile);
         }
-        #else
-        if (!isFile(OVERLAYS_INI_FILEPATH)) {
-            std::ofstream createFile(OVERLAYS_INI_FILEPATH);
-            createFile.close();
-        }
-        #endif
     
         if (overlayFiles.empty()) return;
     
@@ -7156,7 +7304,7 @@ public:
                         returnJumpItemValue = hideOverlayVersions ? "" : overlayVersion;
                         jumpItemName = jumpItemValue = "";
                         
-                        shiftItemFocus(listItem);
+                        tsl::shiftItemFocus(listItem);
                         tsl::changeTo<SettingsMenu>(overlayFileName, OVERLAY_STR, overlayName, overlayVersion, "", !supportsAMS110);
                         triggerRumbleClick.store(true, std::memory_order_release);
                         triggerSettingsSound.store(true, std::memory_order_release);
@@ -7196,7 +7344,7 @@ public:
                     jumpItemExactMatch.store(true, std::memory_order_release);
                     inMainMenu.store(false, std::memory_order_release);
                     inHiddenMode.store(true, std::memory_order_release);
-                    shiftItemFocus(listItem);
+                    tsl::shiftItemFocus(listItem);
                     tsl::changeTo<MainMenu>(OVERLAYS_STR);
                     return true;
                 } else if (keys & SYSTEM_SETTINGS_KEY && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
@@ -7220,6 +7368,12 @@ public:
                 fwrite(packageContent, sizeof(packageContent) - 1, 1, packageFileOut);
                 fclose(packageFileOut);
             }
+        }
+
+        if (triggerBootCommands) {
+            // Load and execute "initial_boot" commands if they exist
+            executeIniCommands(PACKAGE_PATH + BOOT_PACKAGE_FILENAME, "boot");
+            triggerBootCommands = false;
         }
     
         inOverlaysPage.store(false, std::memory_order_release);
@@ -7255,7 +7409,11 @@ public:
                     auto packageIt = packagesIniData.find(packageName);
                     if (packageIt == packagesIniData.end()) {
                         const PackageHeader packageHeader = getPackageHeaderFromIni(PACKAGE_PATH + packageName+ "/" +PACKAGE_FILENAME);
-                        
+                        //if (cleanVersionLabels) {
+                        //    packageHeader.version = cleanVersionLabel(packageHeader.version);
+                        //    removeQuotes(packageHeader.version);
+                        //}
+
                         auto& packageSection = packagesIniData[packageName];
                         packageSection[PRIORITY_STR] = "20";
                         packageSection[STAR_STR] = FALSE_STR;
@@ -7282,11 +7440,11 @@ public:
                         if (hide == TRUE_STR) drawHiddenTab = true;
                         
                         if (inHiddenMode.load(std::memory_order_acquire) == (hide == TRUE_STR)) {
-                            PackageHeader packageHeader = getPackageHeaderFromIni(PACKAGE_PATH + packageName+ "/" +PACKAGE_FILENAME);
-                            if (cleanVersionLabels) {
-                                packageHeader.version = cleanVersionLabel(packageHeader.version);
-                                removeQuotes(packageHeader.version);
-                            }
+                            const PackageHeader packageHeader = getPackageHeaderFromIni(PACKAGE_PATH + packageName+ "/" +PACKAGE_FILENAME);
+                            //if (cleanVersionLabels) {
+                            //    packageHeader.version = cleanVersionLabel(packageHeader.version);
+                            //    removeQuotes(packageHeader.version);
+                            //}
                             
                             const std::string priority = (packageIt->second.find(PRIORITY_STR) != packageIt->second.end()) ? formatPriorityString(packageIt->second[PRIORITY_STR]) : "0020";
                             const std::string starred = (packageIt->second.find(STAR_STR) != packageIt->second.end()) ? packageIt->second[STAR_STR] : FALSE_STR;
@@ -7384,19 +7542,25 @@ public:
                 }
                 displayName += "?";
                 displayName += packageName;
-    
+
+                
+                
                 tsl::elm::ListItem* listItem = new tsl::elm::ListItem(displayName, "");
                 listItem->enableShortHoldKey();
                 listItem->enableLongHoldKey();
 
+                std::string displayVersion;
+
                 if (!hidePackageVersions) {
-                    listItem->setValue(packageVersion, true);
+                    displayVersion.reserve(64);
+                    displayVersion = cleanVersionLabels ? cleanVersionLabel(packageVersion) : packageVersion;
+                    listItem->setValue(displayVersion, true);
                     listItem->setValueColor(usePackageVersions ? tsl::ultPackageVersionTextColor : tsl::packageVersionTextColor);
                 }
                 listItem->setTextColor(usePackageTitles ? tsl::ultPackageTextColor : tsl::packageTextColor);
                 listItem->disableClickAnimation();
                 
-                listItem->setClickListener([listItem, packageFilePath, newStarred, packageName, newPackageName, packageVersion, packageStarred, buildReturnName](s64 keys) {
+                listItem->setClickListener([listItem, packageFilePath, newStarred, packageName, newPackageName, packageVersion, displayVersion, packageStarred, buildReturnName](s64 keys) {
                     if (runningInterpreter.load(acquire)) return false;
                     
                     if (simulatedMenu.load(std::memory_order_acquire)) {
@@ -7437,12 +7601,21 @@ public:
                             }
                         }
 
+                        std::string defaultLang = parseValueFromIniSection(ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, DEFAULT_LANG_STR);
+                        if (defaultLang.empty()) {
+                            defaultLang = "en";
+                        }
+                        const std::string translationJsonPath = packageFilePath+"lang/"+defaultLang+".json";
+
+                        if (ult::isFileOrDirectory(translationJsonPath))
+                            ult::loadTranslationsFromJSON(translationJsonPath); // load translations (optional)
+
                         packageRootLayerTitle = newPackageName;
                         packageRootLayerName = packageName;
                         packageRootLayerVersion = packageVersion;
                 
                         returnJumpItemName = buildReturnName(newStarred, packageName, newPackageName);
-                        returnJumpItemValue = hidePackageVersions ? "" : packageVersion;
+                        returnJumpItemValue = displayVersion;
                 
                         tsl::clearGlyphCacheNow.store(true, release);
                         tsl::swapTo<PackageMenu>(SwapDepth(2), packageFilePath, "");
@@ -7456,7 +7629,7 @@ public:
                         
                         skipJumpReset.store(true, release);
                         jumpItemName = buildReturnName(!newStarred, packageName, newPackageName);
-                        jumpItemValue = hidePackageVersions ? "" : packageVersion;
+                        jumpItemValue = displayVersion;
                         jumpItemExactMatch.store(true, release);
                         
                         wasInHiddenMode = inHiddenMode.load(std::memory_order_acquire);
@@ -7481,10 +7654,10 @@ public:
                         }
                         
                         returnJumpItemName = buildReturnName(newStarred, packageName, newPackageName);
-                        returnJumpItemValue = hidePackageVersions ? "" : packageVersion;
+                        returnJumpItemValue = displayVersion;
                         jumpItemName = jumpItemValue = "";
 
-                        shiftItemFocus(listItem);
+                        tsl::shiftItemFocus(listItem);
                         tsl::changeTo<SettingsMenu>(packageName, PACKAGE_STR, newPackageName, packageVersion);
                         triggerRumbleClick.store(true, std::memory_order_release);
                         triggerSettingsSound.store(true, std::memory_order_release);
@@ -7493,7 +7666,7 @@ public:
                     
                     if (keys & SYSTEM_SETTINGS_KEY && cleanKeys == SYSTEM_SETTINGS_KEY) {
                         returnJumpItemName = buildReturnName(newStarred, packageName, newPackageName);
-                        returnJumpItemValue = hidePackageVersions ? "" : packageVersion;
+                        returnJumpItemValue = displayVersion;
                         return true;
                     }
                     
@@ -7516,7 +7689,7 @@ public:
                     if ((keys & KEY_A && !(keys & ~KEY_A & ALL_KEYS_MASK))) {
                         inMainMenu.store(false, std::memory_order_release);
                         inHiddenMode.store(true, std::memory_order_release);
-                        shiftItemFocus(listItem);
+                        tsl::shiftItemFocus(listItem);
                         tsl::changeTo<MainMenu>(PACKAGES_STR);
                         return true;
                     } else if (keys & SYSTEM_SETTINGS_KEY && !(keys & ~SYSTEM_SETTINGS_KEY & ALL_KEYS_MASK)) {
@@ -7608,7 +7781,7 @@ public:
                                     footerIt->second.find(NULL_STR) == std::string::npos)
                                 {
                                     // Check if footer_highlight exists in the INI
-                                    auto footerHighlightIt = optionSection.find("footer_highlight");
+                                    auto footerHighlightIt = optionSection.find(FOOTER_HIGHLIGHT_STR);
                                     if (footerHighlightIt != optionSection.end()) {
                                         // Use the value from the INI
                                         bool footerHighlightFromIni = (footerHighlightIt->second == TRUE_STR);
@@ -7987,6 +8160,8 @@ void initializeSettingsAndDirectories() {
     createDirectory(THEMES_PATH);
     createDirectory(WALLPAPERS_PATH);
     createDirectory(SOUNDS_PATH);
+    createDirectory(LOADED_SOUNDS_PATH);
+    createDirectory(ASSETS_PATH);
     
     bool settingsLoaded = false;
     bool needsUpdate = false;
@@ -8119,9 +8294,18 @@ void initializeSettingsAndDirectories() {
     if (isFile(langFile))
         parseLanguage(langFile);
     else {
-        if (defaultLang == "en")
-            reinitializeLangVars();
+        //if (defaultLang == "en")
+        reinitializeLangVars();
     }
+
+    // Load local font if needed based on overlay language setting
+    //if (defaultLang == "zh-cn") {
+    //    tsl::gfx::Renderer::get().loadLocalFont(PlSharedFontType_ChineseSimplified);
+    //} else if (defaultLang == "zh-tw") {
+    //    tsl::gfx::Renderer::get().loadLocalFont(PlSharedFontType_ChineseTraditional);
+    //} else if (defaultLang == "ko") {
+    //    tsl::gfx::Renderer::get().loadLocalFont(PlSharedFontType_KO);
+    //}
     
     // Initialize theme
     initializeTheme();
@@ -8161,7 +8345,9 @@ public:
      * This function is called when the overlay transitions from an invisible state to a visible state.
      * It can be used to perform actions or updates specific to the overlay's visibility.
      */
-    virtual void onHide() override {} 
+    virtual void onHide() override {
+        triggerBootCommands = true;
+    } 
 
     /**
      * @brief Loads the initial graphical user interface (GUI) for the overlay.
@@ -8323,7 +8509,7 @@ public:
                 }
                 
                 // Load and execute "initial_boot" commands if they exist
-                executeIniCommands(PACKAGE_PATH + BOOT_PACKAGE_FILENAME, "boot");
+                executeIniCommands(PACKAGE_PATH + BOOT_PACKAGE_FILENAME, "on-boot");
                 
                 const bool disableFuseReload = (parseValueFromIniSection(FUSE_DATA_INI_PATH, FUSE_STR, "disable_reload") == TRUE_STR);
                 if (!disableFuseReload)

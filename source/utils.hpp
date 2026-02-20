@@ -13,7 +13,7 @@
  *   of the project's documentation and must remain intact.
  *
  *  Licensed under GPLv2
- *  Copyright (c) 2023-2025 ppkantorski
+ *  Copyright (c) 2023-2026 ppkantorski
  ********************************************************************************/
 
 #pragma once
@@ -23,12 +23,7 @@
 #include <payload.hpp> // Studious Pancake
 #include <util.hpp> // Studious Pancake
 
-#if !USING_FSTREAM_DIRECTIVE
 #include <stdio.h>
-#else
-#include <fstream>
-#endif
-
 #include <fnmatch.h>
 #include <numeric>
 #include <queue>
@@ -69,6 +64,12 @@ static uint32_t cpuSpeedo0, cpuSpeedo2, socSpeedo0; // CPU, GPU, SOC
 static uint32_t cpuIDDQ, gpuIDDQ, socIDDQ;
 static bool usingEmunand = true;
 
+
+// For persistent versions and colors across nested packages (when not specified)
+std::string packageRootLayerTitle;
+std::string packageRootLayerName;
+std::string packageRootLayerVersion;
+std::string packageRootLayerColor;
 
 
 /**
@@ -329,6 +330,33 @@ bool isVersionGreaterOrEqual(const char* currentVersion, const char* requiredVer
     return currPatch >= reqPatch;
 }
 
+inline bool checkVersionCondition(const std::string& condition, const std::string& currentVersion) {
+    if (condition.empty()) return true;
+
+    const char* cur = currentVersion.c_str();
+    std::string op, ver;
+
+    if (condition.size() > 1 && condition[0] == '>' && condition[1] == '=') {
+        op = ">="; ver = condition.substr(2);
+    } else if (condition.size() > 1 && condition[0] == '<' && condition[1] == '=') {
+        op = "<="; ver = condition.substr(2);
+    } else if (condition[0] == '>') {
+        op = ">"; ver = condition.substr(1);
+    } else if (condition[0] == '<') {
+        op = "<"; ver = condition.substr(1);
+    } else {
+        op = "=="; ver = condition;
+    }
+
+    const char* req = ver.c_str();
+    if (op == "==") return isVersionGreaterOrEqual(cur, req) && isVersionGreaterOrEqual(req, cur);
+    if (op == ">=") return isVersionGreaterOrEqual(cur, req);
+    if (op == "<=") return isVersionGreaterOrEqual(req, cur);
+    if (op == ">")  return isVersionGreaterOrEqual(cur, req) && !isVersionGreaterOrEqual(req, cur);
+    if (op == "<")  return isVersionGreaterOrEqual(req, cur) && !isVersionGreaterOrEqual(cur, req);
+    return true;
+}
+
 
 //void testAudioOutput() {
 //    Result res;
@@ -416,7 +444,6 @@ bool isVersionGreaterOrEqual(const char* currentVersion, const char* requiredVer
 //}
 
 void writeFuseIni(const std::string& outputPath, const char* data = nullptr) {
-#if !USING_FSTREAM_DIRECTIVE
     // Use stdio.h functions for file operations
     FILE* outFile = fopen(outputPath.c_str(), "w");
     if (outFile) {
@@ -446,38 +473,6 @@ void writeFuseIni(const std::string& outputPath, const char* data = nullptr) {
         }
         fclose(outFile);
     }
-#else
-    // Use fstream for file operations
-    std::ofstream outFile(outputPath);
-    if (outFile) {
-        // Uncomment this line if needed to include the commented warning line
-        // outFile.write("; do not adjust these values manually unless they were not dumped correctly\n", 81);
-
-        outFile.write("[", 1);
-        outFile.write(FUSE_STR.c_str(), FUSE_STR.size());
-        outFile.write("]\n", 2);
-
-        if (data) {
-            outFile << "cpu_speedo_0=" << *reinterpret_cast<const uint32_t*>(data + FUSE_CPU_SPEEDO_0_CALIB) << '\n'
-                    << "cpu_speedo_2=" << *reinterpret_cast<const uint32_t*>(data + FUSE_CPU_SPEEDO_2_CALIB) << '\n'
-                    << "soc_speedo_0=" << *reinterpret_cast<const uint32_t*>(data + FUSE_SOC_SPEEDO_0_CALIB) << '\n'
-                    << "cpu_iddq=" << *reinterpret_cast<const uint32_t*>(data + FUSE_CPU_IDDQ_CALIB) << '\n'
-                    << "soc_iddq=" << *reinterpret_cast<const uint32_t*>(data + FUSE_SOC_IDDQ_CALIB) << '\n'
-                    << "gpu_iddq=" << *reinterpret_cast<const uint32_t*>(data + FUSE_GPU_IDDQ_CALIB) << '\n'
-                    << "disable_reload=false\n";
-        } else {
-            outFile << "cpu_speedo_0=\n"
-                    << "cpu_speedo_2=\n"
-                    << "soc_speedo_0=\n"
-                    << "cpu_iddq=\n"
-                    << "soc_iddq=\n"
-                    << "gpu_iddq=\n"
-                    << "disable_reload=false\n";
-        }
-
-        outFile.close();
-    }
-#endif
 }
 
 
@@ -565,8 +560,33 @@ std::string getLocalIpAddress() {
     }
 }
 
+std::string getMasterVolumeLevel() {
+    audctlInitialize();
+    float currentVolume = 0.0f;
+    Result rc = audctlGetSystemOutputMasterVolume(&currentVolume);
+    audctlExit();
+    
+    if (R_SUCCEEDED(rc)) {
+        int volumePercentage = static_cast<int>(currentVolume * 100.0f + 0.5f);
+        return ult::to_string(volumePercentage);
+    }
+    
+    return "100"; // Default to 100 if failed
+}
 
-
+std::string getBacklightLevel() {
+    lblInitialize();
+    float currentBrightness = 0.0f;
+    Result rc = lblGetCurrentBrightnessSetting(&currentBrightness);
+    lblExit();
+    
+    if (R_SUCCEEDED(rc)) {
+        int brightnessPercentage = static_cast<int>(currentBrightness * 100.0f + 0.5f);
+        return ult::to_string(brightnessPercentage);
+    }
+    
+    return "100"; // Default to 100 if failed
+}
 
 // Function to remove all empty command strings
 void removeEmptyCommands(std::vector<std::vector<std::string>>& commands) {
@@ -1303,6 +1323,53 @@ void addGap(tsl::elm::List* list, s32 gapHeight) {
     ), gapHeight);
 }
 
+// Returns true for scripts where every character is a standalone word unit
+static bool isWordPerCharScript(u32 cp) {
+    return (cp >= 0x1100  && cp <= 0x11FF)  // Hangul Jamo
+        || (cp >= 0x2E80  && cp <= 0x2FFF)  // CJK radicals, Kangxi
+        || (cp >= 0x3000  && cp <= 0x303F)  // CJK symbols & punctuation
+        || (cp >= 0x3040  && cp <= 0x30FF)  // Hiragana + Katakana
+        || (cp >= 0x3100  && cp <= 0x318F)  // Bopomofo + Hangul compat jamo
+        || (cp >= 0x3200  && cp <= 0x33FF)  // Enclosed/compat CJK
+        || (cp >= 0x3400  && cp <= 0x4DBF)  // CJK extension A
+        || (cp >= 0x4E00  && cp <= 0x9FFF)  // CJK unified ideographs
+        || (cp >= 0xA000  && cp <= 0xA4FF)  // Yi
+        || (cp >= 0xA960  && cp <= 0xA97F)  // Hangul Jamo extended A
+        || (cp >= 0xAC00  && cp <= 0xD7FF)  // Hangul syllables + Jamo extended B
+        || (cp >= 0xF900  && cp <= 0xFAFF)  // CJK compatibility ideographs
+        || (cp >= 0xFE30  && cp <= 0xFE4F)  // CJK compatibility forms
+        || (cp >= 0x20000 && cp <= 0x2A6DF) // CJK extension B
+        || (cp >= 0x2A700 && cp <= 0x2CEAF) // CJK extensions C/D/E
+        || (cp >= 0x2CEB0 && cp <= 0x2EBEF) // CJK extension F
+        || (cp >= 0x30000 && cp <= 0x3134F); // CJK extension G
+}
+
+static bool isLineStartForbidden(u32 cp) {
+    // Punctuation that must not appear at the start of a line
+    return cp == 0x3001  // 、
+        || cp == 0x3002  // 。
+        || cp == 0xFF0C  // ，
+        || cp == 0xFF0E  // ．
+        || cp == 0xFF1A  // ：
+        || cp == 0xFF1B  // ；
+        || cp == 0xFF01  // ！
+        || cp == 0xFF1F  // ？
+        || cp == 0x30FB  // ・
+        || cp == 0xFF65  // ･
+        || cp == 0xFF09  // ）
+        || cp == 0x3015  // 〕
+        || cp == 0x3011  // 】
+        || cp == 0x3009  // 〉
+        || cp == 0x300B  // 》
+        || cp == 0x3003  // 」
+        || cp == 0x300D  // 」
+        || cp == 0x300F  // 』
+        || cp == 0x2026  // …
+        || cp == 0x2014  // —
+        || cp == 0xFF5D  // ｝
+        || cp == 0x30FC; // ー (prolonged sound mark, also line-start forbidden)
+}
+
 std::vector<std::string> wrapText(
     const std::string& text,
     float maxWidth,
@@ -1312,80 +1379,172 @@ std::vector<std::string> wrapText(
     float indentWidth,
     size_t fontSize
 ) {
-    if (wrappingMode == "none" || (wrappingMode != "char" && wrappingMode != "word")) {
+    if (wrappingMode == "none" || (wrappingMode != "char" && wrappingMode != "word"))
         return { text };
-    }
 
     std::vector<std::string> wrappedLines;
-
     bool firstLine = true;
     std::string currentLine;
 
+    auto pushLine = [&](const std::string& line) {
+        if (useIndent && !firstLine) {
+            const std::string& last = wrappedLines.empty() ? "" : wrappedLines.back();
+            size_t i = 0;
+            while (i < last.size() && last[i] == ' ') i++;
+            wrappedLines.push_back(last.substr(0, i) + indent + line);
+        } else {
+            wrappedLines.push_back(line);
+        }
+    };
+
+    auto currentMaxWidth = [&]() -> float {
+        if (firstLine) return maxWidth;
+        if (!useIndent || wrappedLines.empty()) return maxWidth - indentWidth;
+        const std::string& last = wrappedLines.back();
+        size_t i = 0;
+        while (i < last.size() && last[i] == ' ') i++;
+        const float gapWidth = tsl::gfx::calculateStringWidth(last.substr(0, i), fontSize, false);
+        return maxWidth - gapWidth - indentWidth;
+    };
+
     if (wrappingMode == "char") {
-        for (char c : text) {
-            const float currentMaxWidth = firstLine ? maxWidth : maxWidth - indentWidth;
+        static const std::string hyphen = "-";
+        u32 prevCharacter = 0;
+        u32 prevPrevCharacter = 0;
+        auto itStr = text.cbegin();
+        const auto itStrEnd = text.cend();
 
-            currentLine.push_back(c);
-            if (tsl::gfx::calculateStringWidth(currentLine, fontSize, false) > currentMaxWidth) {
-                // Remove last character and push line
-                const char lastChar = currentLine.back();
-                currentLine.pop_back();
+        while (itStr != itStrEnd) {
+            u32 currCharacter;
+            const ssize_t codepointWidth = decode_utf8(&currCharacter, reinterpret_cast<const u8*>(&(*itStr)));
+            if (codepointWidth <= 0) break;
+
+            std::string charStr(itStr, itStr + codepointWidth);
+            std::string testLine = currentLine + charStr;
+
+            if (tsl::gfx::calculateStringWidth(testLine, fontSize, false) > currentMaxWidth()) {
                 if (!currentLine.empty()) {
-                    if (useIndent && !firstLine)
-                        wrappedLines.push_back(indent + currentLine);
-                    else
-                        wrappedLines.push_back(currentLine);
-                }
-                currentLine = lastChar;
-                firstLine = false;
-            }
-        }
+                    // Kinsoku: if the overflowing character must not start a line,
+                    // absorb it onto the current line and accept the overflow
+                    if (isLineStartForbidden(currCharacter)) {
+                        pushLine(currentLine + charStr);
+                        currentLine.clear();
+                        firstLine = false;
+                        itStr += codepointWidth;
+                        prevPrevCharacter = prevCharacter;
+                        prevCharacter = currCharacter;
+                        continue;
+                    }
 
-        if (!currentLine.empty()) {
-            if (useIndent && !firstLine)
-                wrappedLines.push_back(indent + currentLine);
-            else
-                wrappedLines.push_back(currentLine);
+                    const bool needsHyphen = !useIndent
+                                          && (prevCharacter != ' ')
+                                          && (currCharacter != ' ')
+                                          && !isWordPerCharScript(prevCharacter)
+                                          && !isWordPerCharScript(currCharacter);
+                    if (needsHyphen) {
+                        std::string withHyphen = currentLine + hyphen;
+                        if (tsl::gfx::calculateStringWidth(withHyphen, fontSize, false) > currentMaxWidth()) {
+                            auto it = currentLine.end();
+                            while (it != currentLine.begin()) {
+                                --it;
+                                if ((*it & 0xC0) != 0x80) break;
+                            }
+                            charStr = std::string(it, currentLine.end()) + charStr;
+                            currentLine.erase(it, currentLine.end());
+                            withHyphen = (prevPrevCharacter != 0 && prevPrevCharacter != ' ') ? currentLine + hyphen : currentLine;
+                        }
+                        pushLine(withHyphen);
+                    } else {
+                        pushLine(currentLine);
+                    }
+                }
+
+                if (currCharacter == ' ') {
+                    itStr += codepointWidth;
+                    prevPrevCharacter = prevCharacter;
+                    prevCharacter = currCharacter;
+                    currentLine.clear();
+                    firstLine = false;
+                    continue;
+                }
+
+                currentLine = charStr;
+                prevPrevCharacter = prevCharacter;
+                prevCharacter = currCharacter;
+                firstLine = false;
+            } else {
+                currentLine = testLine;
+                prevPrevCharacter = prevCharacter;
+                prevCharacter = currCharacter;
+            }
+
+            itStr += codepointWidth;
         }
-    } 
-    else {
-        // Word wrapping
+    } else {
         StringStream stream(text);
         std::string currentWord;
-
         std::string testLine;
 
         while (stream >> currentWord) {
-            const float currentMaxWidth = firstLine ? maxWidth : maxWidth - indentWidth;
+            u32 firstCp = 0;
+            decode_utf8(&firstCp, reinterpret_cast<const u8*>(currentWord.c_str()));
 
-            testLine = currentLine;
-            if (!testLine.empty()) testLine.push_back(' ');
-            testLine += currentWord;
-
-            if (tsl::gfx::calculateStringWidth(testLine, fontSize, false) > currentMaxWidth) {
-                if (!currentLine.empty()) {
-                    if (useIndent && !firstLine)
-                        wrappedLines.push_back(indent + currentLine);
-                    else
-                        wrappedLines.push_back(currentLine);
+            if (isWordPerCharScript(firstCp)) {
+                auto itW = currentWord.cbegin();
+                const auto itWEnd = currentWord.cend();
+                bool firstChar = true;
+                while (itW != itWEnd) {
+                    u32 cp;
+                    const ssize_t w = decode_utf8(&cp, reinterpret_cast<const u8*>(&(*itW)));
+                    if (w <= 0) break;
+                    std::string charStr(itW, itW + w);
+                    testLine = currentLine;
+                    if (firstChar && !testLine.empty())
+                        testLine.push_back(' ');
+                    testLine += charStr;
+                    if (tsl::gfx::calculateStringWidth(testLine, fontSize, false) > currentMaxWidth()) {
+                        if (!currentLine.empty()) {
+                            if (isLineStartForbidden(cp)) {
+                                // Absorb onto current line, accept overflow
+                                pushLine(currentLine + charStr);
+                                currentLine.clear();
+                            } else {
+                                pushLine(currentLine);
+                                currentLine = charStr;
+                            }
+                            firstLine = false;
+                        } else {
+                            currentLine = charStr;
+                            firstLine = false;
+                        }
+                    } else {
+                        currentLine = testLine;
+                    }
+                    firstChar = false;
+                    itW += w;
                 }
-                currentLine = std::move(currentWord);
-                firstLine = false;
             } else {
-                currentLine.swap(testLine);
+                testLine = currentLine;
+                if (!testLine.empty()) testLine.push_back(' ');
+                testLine += currentWord;
+                if (tsl::gfx::calculateStringWidth(testLine, fontSize, false) > currentMaxWidth()) {
+                    if (!currentLine.empty())
+                        pushLine(currentLine);
+                    currentLine = std::move(currentWord);
+                    firstLine = false;
+                } else {
+                    currentLine.swap(testLine);
+                }
             }
-        }
-
-        if (!currentLine.empty()) {
-            if (useIndent && !firstLine)
-                wrappedLines.push_back(indent + currentLine);
-            else
-                wrappedLines.push_back(currentLine);
         }
     }
 
+    if (!currentLine.empty())
+        pushLine(currentLine);
+
     return wrappedLines;
 }
+
 
 // ─── Helper: flatten + placeholder + wrap & expand ─────────────────────────────
 static bool buildTableDrawerLines(
@@ -1766,89 +1925,128 @@ void addHelpInfo(tsl::elm::List* list) {
 }
 
 
+// Returns the last Unicode codepoint in a UTF-8 string, or 0 on failure
+static u32 lastCodepoint(const std::string& s) {
+    if (s.empty()) return 0;
+    const u8* ptr = reinterpret_cast<const u8*>(s.c_str());
+    const u8* end = ptr + s.size();
+    u32 cp = 0;
+    while (ptr < end) {
+        u32 tmp;
+        ssize_t w = decode_utf8(&tmp, ptr);
+        if (w <= 0) break;
+        cp = tmp;
+        ptr += w;
+    }
+    return cp;
+}
 
-void addPackageInfo(tsl::elm::List* list, auto& packageHeader, std::string type = PACKAGE_STR) {
-    // Add a section break with small text to indicate the "Commands" section
+
+void addPackageInfo(tsl::elm::List* list, auto& packageHeader, std::string type = PACKAGE_STR, std::string defaultLang = "en") {
     addHeader(list, (type == PACKAGE_STR ? PACKAGE_INFO : OVERLAY_INFO));
 
-    const int maxLineLength = 28;  // Adjust the maximum line length as needed
-    const int xOffset = 120;    // Adjust the horizontal offset as needed
-    //int numEntries = 0;   // Count of the number of entries
+    static constexpr size_t xOffset = 120;
+    static constexpr size_t fontSize = 16;
+    const float infoMaxWidth = static_cast<float>(tsl::cfg::FramebufferWidth - 95 - xOffset);
 
     std::vector<std::string> sectionLines;
     std::vector<std::string> infoLines;
 
-    // Helper function to add text with wrapping
-    auto addWrappedText = [&](const std::string& header, const std::string& text) {
+    auto addField = [&](const std::string& header, const std::string& text, const std::string& mode) {
+        if (text.empty()) return;
         sectionLines.push_back(header);
-        const std::string::size_type aboutHeaderLength = header.length();
-        
-        size_t startPos = 0;
-        size_t spacePos = 0;
-
-        size_t endPos;
-        std::string line;
-
-        while (startPos < text.length()) {
-            endPos = std::min(startPos + maxLineLength, text.length());
-            line = text.substr(startPos, endPos - startPos);
-            
-            // Check if the current line ends with a space; if not, find the last space in the line
-            if (endPos < text.length() && text[endPos] != ' ') {
-                spacePos = line.find_last_of(' ');
-                if (spacePos != std::string::npos) {
-                    endPos = startPos + spacePos;
-                    line = text.substr(startPos, endPos - startPos);
-                }
-            }
-
-            infoLines.push_back(line);
-            startPos = endPos + 1;
-            //numEntries++;
-
-            // Add corresponding newline to the packageSectionString
-            if (startPos < text.length())
-                sectionLines.push_back(std::string(aboutHeaderLength, ' '));
+        const size_t headerLen = header.length();
+        const auto lines = wrapText(text, infoMaxWidth, mode, false, "", 0, fontSize);
+        for (size_t i = 0; i < lines.size(); i++) {
+            infoLines.push_back(lines[i]);
+            if (i + 1 < lines.size())
+                sectionLines.push_back(std::string(headerLen, ' '));
         }
     };
 
-    // Adding package header info
-    if (!packageHeader.title.empty()) {
-        sectionLines.push_back(_TITLE);
-        infoLines.push_back(packageHeader.title);
-        //numEntries++;
+    std::string creatorHeader = _CREATOR;
+    
+    const bool hasComma =
+        packageHeader.creator.find(',')  != std::string::npos ||  // ASCII
+        packageHeader.creator.find("，") != std::string::npos ||  // Chinese
+        packageHeader.creator.find("、") != std::string::npos;    // Japanese
+    
+    if (type == OVERLAY_STR || !hasComma) {
+        if (auto pos = creatorHeader.find('('); pos != std::string::npos)
+            creatorHeader.resize(pos);
     }
 
-    if (!packageHeader.version.empty()) {
-        sectionLines.push_back(_VERSION);
-        infoLines.push_back(packageHeader.version);
-        //numEntries++;
-    }
-
-    if (!packageHeader.creator.empty()) {
-        //sectionLines.push_back(CREATOR);
-        //infoLines.push_back(packageHeader.creator);
-        //numEntries++;
-        addWrappedText(_CREATOR, packageHeader.creator);
-    }
-
-    if (!packageHeader.about.empty()) {
-        addWrappedText(_ABOUT, packageHeader.about);
-    }
-
-    if (!packageHeader.credits.empty()) {
-        addWrappedText(_CREDITS, packageHeader.credits);
-    }
+    addField(_TITLE,   packageHeader.title,   "none");
+    addField(_VERSION, packageHeader.version, "none");
+    addField(creatorHeader, packageHeader.creator, "none");
+    addField(_ABOUT,   packageHeader.about,   defaultLang == "en" ? "word" : "char");
+    addField(_CREDITS, packageHeader.credits, "word");
 
     std::vector<std::vector<std::string>> dummyTableData;
-
-    // Drawing the table with section lines and info lines
-    //drawTable(list, sectionLines, infoLines, xOffset, 20, 12, 3);
     drawTable(list, dummyTableData, sectionLines, infoLines, xOffset, 20, 9, 3, DEFAULT_STR, DEFAULT_STR, DEFAULT_STR, LEFT_STR, false, false, true);
 }
 
+// Load once at startup, store globally
+std::vector<u8> devImageData;
+constexpr s32 devImageWidth  = 121;
+constexpr s32 devImageHeight = 89;
+constexpr size_t devImageFrameSize = devImageWidth * devImageHeight * 2; // RGBA4444
 
+bool loadDevImages() {
+    const std::string p1 = ASSETS_PATH + "ppkantorski-1.rgba";
+    const std::string p2 = ASSETS_PATH + "ppkantorski-2.rgba";
+    if (!isFile(p1) || !isFile(p2)) return false;
+    devImageData.resize(devImageFrameSize * 2);
+    constexpr size_t srcSize = devImageWidth * devImageHeight * 4;
+    return loadRGBA8888toRGBA4444(p1, devImageData.data(), srcSize) &&
+           loadRGBA8888toRGBA4444(p2, devImageData.data() + devImageFrameSize, srcSize);
+}
 
+static u64  creatorStartTick = 0, nextBlinkTick = 0, blinkEndTick = 0;
+static bool creatorAnimDone  = false;
+
+void drawDevImage(tsl::gfx::Renderer* renderer) {
+    if (devImageData.size() < devImageFrameSize * 2) return;
+    if (creatorStartTick == 0)
+        creatorStartTick = armGetSystemTick();
+    s32 drawY;
+    constexpr float targetY = 557.0f, startY = targetY + devImageHeight;
+    constexpr float duration = 0.5f, delay = 0.2f;
+    if (!creatorAnimDone) {
+        const float elapsed = armTicksToNs(armGetSystemTick() - creatorStartTick) / 1e9f;
+        if (elapsed < delay) {
+            drawY = static_cast<s32>(startY);
+        } else {
+            const float t = std::min((elapsed - delay) / duration, 1.0f);
+            const float ease = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+            drawY = static_cast<s32>(startY + (targetY - startY) * ease);
+            if (t >= 1.0f) {
+                creatorAnimDone = true;
+                drawY = static_cast<s32>(targetY);
+                const float firstBlink = 1.0f + (rand() % 300) / 100.0f;
+                nextBlinkTick = armGetSystemTick() + armNsToTicks(static_cast<u64>(firstBlink * 1e9f));
+            }
+        }
+    } else {
+        drawY = static_cast<s32>(targetY);
+    }
+    bool useFrame2 = false;
+    if (creatorAnimDone) {
+        const u64 now = armGetSystemTick();
+        if (blinkEndTick > 0 && now < blinkEndTick) {
+            useFrame2 = true;
+        } else if (blinkEndTick > 0 && now >= blinkEndTick) {
+            blinkEndTick = 0;
+            nextBlinkTick = now + armNsToTicks(static_cast<u64>((1.0f + (rand() % 600) / 100.0f) * 1e9f));
+        } else if (nextBlinkTick > 0 && now >= nextBlinkTick) {
+            blinkEndTick  = now + armNsToTicks(150000000ULL);
+            nextBlinkTick = 0;
+            useFrame2 = true;
+        }
+    }
+    const u8* imageData = devImageData.data() + (useFrame2 ? devImageFrameSize : 0);
+    renderer->drawBitmapRGBA4444(258, drawY, devImageWidth, devImageHeight, imageData, tsl::gfx::Renderer::s_opacity);
+}
 
 
 /**
@@ -2934,96 +3132,102 @@ static size_t findMatchingClose(const std::string& s,
  * @note Source placeholders like {list_source(*)}, {file_source} are resolved in
  *       getSourceReplacement() and will be skipped by this function.
  */
-bool replacePlaceholdersRecursively(
+static bool replacePlaceholdersRecursivelyImpl(
     std::string& arg,
-    const std::vector<std::pair<std::string, std::function<std::string(const std::string&)>>>& placeholders) {
+    const std::vector<std::pair<std::string, std::function<std::string(const std::string&)>>>& placeholders,
+    const std::vector<std::string>& starts) {
+    
     bool anyReplacementsMade = false;
-
-    // Precompute all opener tokens ("{slice(", "{math(", ...).
-    std::vector<std::string> starts;
-    starts.reserve(placeholders.size());
-    for (const auto& pr : placeholders) {
-        starts.push_back(pr.first);
-    }
-
     bool replacedThisPass;
     size_t searchPos;
     std::string replacement;
     std::string inner;
-    std::string innerBeforeRecursion;
+    std::string resolvedPlaceholder;
 
-    // Keep sweeping until no replacements occur
     for (;;) {
         replacedThisPass = false;
 
-        // Try each placeholder type
         for (size_t t = 0; t < placeholders.size(); ++t) {
-            const auto& opener = placeholders[t].first;      // e.g., "{slice("
+            const auto& opener = placeholders[t].first;
             const auto& replacer = placeholders[t].second;
+            const size_t openerLen = opener.size();
 
             searchPos = 0;
-
             while (true) {
-                // Find the next occurrence of THIS opener
                 const size_t startPos = arg.find(opener, searchPos);
                 if (startPos == std::string::npos) break;
 
-                // Find its matching ")}" by counting nested ANY opener
-                const size_t closePos = findMatchingClose(arg, startPos, starts, opener.size());
+                const size_t closePos = findMatchingClose(arg, startPos, starts, openerLen);
                 if (closePos == std::string::npos) {
-                    // Unbalanced; skip this and move on to avoid infinite loop
-                    searchPos = startPos + opener.size();
+                    searchPos = startPos + openerLen;
                     continue;
                 }
 
-                // Full placeholder text including wrapper: "{name(...)}"
-                const size_t fullLen = (closePos - startPos) + 2; // include the ")}"
-                const std::string placeholderText = arg.substr(startPos, fullLen);
+                const size_t innerStart = startPos + openerLen;
+                const size_t innerLen   = closePos - innerStart;
+                const size_t fullLen    = closePos - startPos + 2;
 
-                // Resolve INNER content first (exclude the outer wrapper)
-                const size_t innerStart = opener.size();
-                const size_t innerLen = placeholderText.size() - innerStart - 2; // minus ")}"
-                inner = placeholderText.substr(innerStart, innerLen);
-
-                // Save the original inner content before recursion
-                innerBeforeRecursion = inner;
-
-                // Recurse on inner to resolve any nested placeholders
-                replacePlaceholdersRecursively(inner, placeholders);
-
-                // Check if recursion made progress
-                // If inner didn't change AND still contains placeholder patterns,
-                // it means the inner placeholders couldn't be resolved
-                // Skip this outer placeholder and leave it for later resolution
-                if (inner == innerBeforeRecursion && inner.find('{') != std::string::npos) {
-                    searchPos = startPos + opener.size();
-                    continue;
+                bool innerChanged = false;
+                
+                // Skip recursion entirely if inner is empty or has no placeholders
+                if (innerLen > 0) {
+                    inner.assign(arg, innerStart, innerLen);
+                    if (inner.find('{') != std::string::npos) {
+                        innerChanged = replacePlaceholdersRecursivelyImpl(inner, placeholders, starts);
+                        
+                        // If recursion made no changes and inner still has unresolved placeholders,
+                        // skip this outer placeholder
+                        if (!innerChanged) {
+                            searchPos = startPos + openerLen;
+                            continue;
+                        }
+                    }
                 }
 
-                // Rebuild the outer placeholder with resolved inner args
-                const std::string resolvedPlaceholder = opener + inner + ")}";
+                // Build the resolved placeholder
+                if (!innerChanged) {
+                    resolvedPlaceholder.assign(arg, startPos, fullLen);
+                } else {
+                    resolvedPlaceholder.clear();
+                    resolvedPlaceholder.reserve(openerLen + inner.size() + 2);
+                    resolvedPlaceholder += opener;
+                    resolvedPlaceholder += inner;
+                    resolvedPlaceholder += ")}";
+                }
 
-                // Call the replacer on the fully resolved placeholder
                 replacement = replacer(resolvedPlaceholder);
 
-                // Perform replacement
+                if (replacement.size() == resolvedPlaceholder.size() && replacement == resolvedPlaceholder) {
+                    searchPos = startPos + openerLen;
+                    continue;
+                }
+
                 arg.replace(startPos, fullLen, replacement);
-                
                 anyReplacementsMade = true;
                 replacedThisPass = true;
-                
-                // Continue scanning after the replacement
                 searchPos = startPos + replacement.size();
             }
         }
 
-        // If no replacements were made this pass, we're done
         if (!replacedThisPass) break;
     }
 
     return anyReplacementsMade;
 }
 
+bool replacePlaceholdersRecursively(
+    std::string& arg,
+    const std::vector<std::pair<std::string, std::function<std::string(const std::string&)>>>& placeholders) {
+    
+    if (arg.find('{') == std::string::npos) return false;
+
+    std::vector<std::string> starts;
+    starts.reserve(placeholders.size());
+    for (const auto& pr : placeholders) {
+        starts.push_back(pr.first);
+    }
+    return replacePlaceholdersRecursivelyImpl(arg, placeholders, starts);
+}
 
 
 std::unordered_map<std::string, std::string> generalPlaceholders;
@@ -3033,6 +3237,7 @@ void updateGeneralPlaceholders() {
         {"{ram_model}", memoryModel},
         {"{ams_version}", amsVersion},
         {"{hos_version}", hosVersion},
+        {"{package_version}", packageRootLayerVersion},
         {"{cpu_speedo}", ult::to_string(cpuSpeedo0)},
         {"{cpu_iddq}", ult::to_string(cpuIDDQ)},
         {"{gpu_speedo}", ult::to_string(cpuSpeedo2)},
@@ -3041,7 +3246,9 @@ void updateGeneralPlaceholders() {
         {"{soc_iddq}", ult::to_string(socIDDQ)},
         {"{title_id}", getTitleIdAsString()},
         {"{build_id}", getBuildIdAsString()},
-        {"{local_ip}", getLocalIpAddress()}
+        {"{local_ip}", getLocalIpAddress()},
+        {"{volume}", getMasterVolumeLevel()},
+        {"{backlight}", getBacklightLevel()}
     };
 }
 
@@ -3989,7 +4196,6 @@ void handleMoveCommand(const std::vector<std::string>& cmd, const std::string& p
         //destinationPath.reserve(1024);
     
         // Stream process both files line by line
-    #if !USING_FSTREAM_DIRECTIVE
         FILE* sourceFile = fopen(sourceListPath.c_str(), "r");
         FILE* destFile = fopen(destinationListPath.c_str(), "r");
         
@@ -4084,61 +4290,6 @@ void handleMoveCommand(const std::vector<std::string>& cmd, const std::string& p
         
         fclose(sourceFile);
         fclose(destFile);
-        
-    #else
-        std::ifstream sourceFile(sourceListPath);
-        std::ifstream destFile(destinationListPath);
-        
-        if (!sourceFile.is_open() || !destFile.is_open()) {
-            #if USING_LOGGING_DIRECTIVE
-            if (!disableLogging)
-                logMessage("Failed to open source or destination list files");
-            #endif
-            return;
-        }
-        
-        // Set larger buffers for better I/O performance
-        char sourceFileBuffer[8192], destFileBuffer[8192];
-        sourceFile.rdbuf()->pubsetbuf(sourceFileBuffer, sizeof(sourceFileBuffer));
-        destFile.rdbuf()->pubsetbuf(destFileBuffer, sizeof(destFileBuffer));
-        
-        // Process files line by line simultaneously
-        while (std::getline(sourceFile, sourcePath) && std::getline(destFile, destinationPath)) {
-            preprocessPath(sourcePath, packagePath);
-            preprocessPath(destinationPath, packagePath);
-            
-            // Cache filter lookup result  
-            const bool shouldProcess = !filterSet || filterSet->find(sourcePath) == filterSet->end();
-            
-            if (shouldProcess) {
-                // Check if it's a directory (ends with /)
-                const bool isDirectory = !sourcePath.empty() && sourcePath.back() == '/';
-                
-                if (!isDirectory) {
-                    // Check copy filter once and cache result
-                    const bool shouldCopy = copyFilterSet && copyFilterSet->find(sourcePath) != copyFilterSet->end();
-                    
-                    if (shouldCopy) {
-                        const long long totalSize = getTotalSize(sourcePath);
-                        long long totalBytesCopied = 0;
-                        copyFileOrDirectory(sourcePath, destinationPath, &totalBytesCopied, totalSize);
-                    } else {
-                        moveFileOrDirectory(sourcePath, destinationPath, logSource, logDestination);
-                    }
-                } else {
-                    if (isDirectoryEmpty(sourcePath)) {
-                        moveFileOrDirectory(sourcePath, destinationPath, logSource, logDestination);
-                    }
-                    #if USING_LOGGING_DIRECTIVE
-                    else if (!disableLogging) {
-                        logMessage("Skipping non-empty directory: " + sourcePath);
-                    }
-                    #endif
-                }
-            }
-        }
-    #endif
-    
         
     } else {
         // Single file/directory moving - early returns for error conditions
@@ -5033,6 +5184,19 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
                 return;
             }
             break;
+
+        case '!':
+            if (commandName == "!path_exists") {
+                if (cmdSize >= 2) {
+                    std::string sourcePath = cmd[1];
+                    preprocessPath(sourcePath, packagePath);
+                    if (ult::isFileOrDirectory(sourcePath)) {
+                        commandSuccess.store(false, std::memory_order_release);
+                    } else {
+                        commandSuccess.store(true, std::memory_order_release);
+                    }
+                }
+            }
     }
 }
 
