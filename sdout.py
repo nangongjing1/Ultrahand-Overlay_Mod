@@ -62,15 +62,21 @@ def extract_zip(zip_path, extract_to, exclude_metadata=True):
     print(f"Extracted to {extract_to}")
 
 def create_zip_without_metadata(source_dir, output_zip):
-    """Create a zip file excluding metadata files"""
+    """Create a zip file excluding metadata files, preserving empty directories"""
     print(f"Creating {output_zip}...")
     with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for root, dirs, files in os.walk(source_dir):
+            # Write an explicit entry for empty directories
+            if not files and not dirs:
+                dir_arcname = os.path.relpath(root, source_dir) + '/'
+                zipf.mkdir(dir_arcname)
+                continue
+
             for file in files:
                 # Skip metadata files
                 if file.startswith('._') or file == '.DS_Store':
                     continue
-                
+
                 file_path = os.path.join(root, file)
                 arcname = os.path.relpath(file_path, source_dir)
                 zipf.write(file_path, arcname)
@@ -215,9 +221,9 @@ def main():
         else:
             print("Warning: assets folder not found in Ultrahand repository")
 
-        # Step 8c: Copy common/audio_mastervolume to atmosphere/exefs_patches/audio_mastervolume
+        # Step 8c: Copy common/audio_mastervolume (local repo) to atmosphere/exefs_patches/audio_mastervolume
         print("Copying audio_mastervolume patches...")
-        audio_mv_source = ultrahand_root / "common/audio_mastervolume"
+        audio_mv_source = script_dir / "common/audio_mastervolume"
         audio_mv_dest = sdout_dir / "atmosphere/exefs_patches/audio_mastervolume"
 
         if audio_mv_source.exists():
@@ -226,7 +232,7 @@ def main():
                     shutil.copy2(f, audio_mv_dest)
                     print(f"Copied {f.name}")
         else:
-            print("Warning: common/audio_mastervolume folder not found in Ultrahand repository")
+            print("Warning: common/audio_mastervolume folder not found in local repository")
 
         # Step 9: Copy ovlmenu.ovl
         print("Copying ovlmenu.ovl...")
