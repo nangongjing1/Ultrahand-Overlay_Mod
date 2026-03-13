@@ -104,6 +104,7 @@ def main():
             "config/ultrahand",
             "config/ultrahand/downloads",
             "config/ultrahand/flags",
+            "config/ultrahand/flags/notifications",
             "config/ultrahand/lang",
             "config/ultrahand/notifications",
             "config/ultrahand/payloads",
@@ -114,6 +115,7 @@ def main():
             "switch/.packages",
             "config/ultrahand/.sounds",
             "config/ultrahand/assets",
+            "config/ultrahand/assets/notifications",
             "atmosphere/exefs_patches/audio_mastervolume"
         ]
         
