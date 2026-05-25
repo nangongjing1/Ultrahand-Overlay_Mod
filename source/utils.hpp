@@ -46,6 +46,7 @@ std::atomic<bool> interpreterLogging{false};
 
 
 std::atomic<bool> goBackAfter{false};
+std::atomic<bool> triggerReturnToPackages{false};
 
 std::atomic<bool> usingErista{util::IsErista()};
 std::atomic<bool> usingMariko{util::IsMariko()};
@@ -58,9 +59,12 @@ static char hosVersion[12];
 static std::string memoryVendor = UNAVAILABLE_SELECTION;
 static std::string memoryModel = UNAVAILABLE_SELECTION;
 static std::string memorySize = UNAVAILABLE_SELECTION;
+static std::string hekateVersion = UNAVAILABLE_SELECTION;
+static std::string ovlloaderVersion = UNAVAILABLE_SELECTION; 
 static uint32_t cpuSpeedo0, cpuSpeedo2, socSpeedo0; // CPU, GPU, SOC
 static uint32_t cpuIDDQ, gpuIDDQ, socIDDQ;
 static bool usingEmunand = true;
+static bool is8GBEnabled = false;
 
 
 // For persistent versions and colors across nested packages (when not specified)
@@ -382,9 +386,18 @@ void writeFuseIni(const std::string& outputPath, const char* data = nullptr) {
             fprintf(outFile, "cpu_speedo_0=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_CPU_SPEEDO_0_CALIB));
             fprintf(outFile, "cpu_speedo_2=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_CPU_SPEEDO_2_CALIB));
             fprintf(outFile, "soc_speedo_0=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_SOC_SPEEDO_0_CALIB));
-            fprintf(outFile, "cpu_iddq=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_CPU_IDDQ_CALIB));
-            fprintf(outFile, "soc_iddq=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_SOC_IDDQ_CALIB));
-            fprintf(outFile, "gpu_iddq=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_GPU_IDDQ_CALIB));
+            fprintf(outFile, "cpu_iddq=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_CPU_IDDQ_CALIB) * 4);
+            fprintf(outFile, "soc_iddq=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_SOC_IDDQ_CALIB) * 4);
+            fprintf(outFile, "gpu_iddq=%u\n", *reinterpret_cast<const uint32_t*>(data + FUSE_GPU_IDDQ_CALIB) * 5);
+            // Detect RAM size at write time and persist it
+            {
+                u64 totalMem = 0;
+                const char* ramSizeGB = "4";
+                if (R_SUCCEEDED(svcGetSystemInfo(&totalMem, 0, INVALID_HANDLE, 0)) &&
+                    totalMem > (6ULL * 1024 * 1024 * 1024))
+                    ramSizeGB = "8";
+                fprintf(outFile, "ram_size_gb=%s\n", ramSizeGB);
+            }
             fputs("disable_reload=false\n", outFile);
         } else {
             // Single fputs call instead of seven separate ones
@@ -394,6 +407,7 @@ void writeFuseIni(const std::string& outputPath, const char* data = nullptr) {
                   "cpu_iddq=\n"
                   "soc_iddq=\n"
                   "gpu_iddq=\n"
+                  "ram_size_gb=\n"
                   "disable_reload=false\n", outFile);
         }
         fclose(outFile);
@@ -654,6 +668,15 @@ void unpackDeviceInfo() {
 
     splGetConfig((SplConfigItem)65007, &packed_version);
     usingEmunand = (packed_version != 0);
+
+    // Cache hekate version once at startup (extractVersionFromBinary reads the entire binary)
+    const std::string _hekateVer = extractVersionFromBinary("sdmc:/bootloader/update.bin");
+    hekateVersion = _hekateVer.empty() ? UNAVAILABLE_SELECTION : _hekateVer;
+
+    // nx-volloader version
+    const std::string _ovlloaderVer = cleanVersionLabel(loaderInfo);
+    ovlloaderVersion = _ovlloaderVer.empty() ? UNAVAILABLE_SELECTION : _ovlloaderVer;
+
     fuseDumpToIni();
     
     if (isFile(FUSE_DATA_INI_PATH)) {
@@ -672,6 +695,17 @@ void unpackDeviceInfo() {
         cpuIDDQ = getValue("cpu_iddq");
         socIDDQ = getValue("soc_iddq");
         gpuIDDQ = getValue("gpu_iddq");
+
+        auto itRamSize = fuseSection.find("ram_size_gb");
+        if (itRamSize != end && !itRamSize->second.empty()) {
+            is8GBEnabled = (itRamSize->second == "8");
+        } else {
+            // Key missing (old fuse file) — detect live and patch the file
+            u64 totalMem = 0;
+            is8GBEnabled = R_SUCCEEDED(svcGetSystemInfo(&totalMem, 0, INVALID_HANDLE, 0)) &&
+                           totalMem > (6ULL * 1024 * 1024 * 1024);
+            setIniFileValue(FUSE_DATA_INI_PATH, FUSE_STR, "ram_size_gb", is8GBEnabled ? "8" : "4");
+        }
     }
 }
 
@@ -1189,8 +1223,9 @@ static bool buildTableDrawerLines(
     auto processLines = [&](const std::vector<std::string>& lines, const std::vector<std::string>& infos) {
         std::string infoText;
         int xPos;
-        float infoWidth;
+        float lineInfoWidth;
         std::vector<std::string> wrappedLines;
+        std::vector<std::string> wrappedInfoLines;
         for (size_t i = 0; i < lines.size(); ++i) {
             const std::string& baseText = lines[i];
             const std::string& infoTextRaw = (i < infos.size()) ? infos[i] : "";
@@ -1205,20 +1240,40 @@ static bool buildTableDrawerLines(
                 fontSize
             );
 
-            infoWidth = tsl::gfx::calculateStringWidth(infoText, fontSize, false);
+            // Wrap the info/values column.
+            // The label column's right edge is at (x+12) + (xMax-8) = x + xMax + 4.
+            // The info column starts at x + columnOffset, so its wrap width to reach
+            // the same right boundary is: (xMax + 4) - columnOffset.
+            // Pass empty indent/"" and 0 indentWidth (no indent for values column, and
+            // passing a non-zero indentWidth can affect effective line width inside
+            // wrapText even when useIndent=false, causing uneven line breaks).
+            wrappedInfoLines = tsl::wrapText(
+                infoText,
+                static_cast<float>(xMax) + 4.0f - static_cast<float>(columnOffset),
+                wrappingMode,
+                false,
+                "", 0.0f,
+                fontSize
+            );
 
-            for (auto& line : wrappedLines) {
-                outSection.push_back(std::move(line));
-                line.shrink_to_fit();
-                outInfo.push_back(infoText);
+            const size_t rowCount = std::max(wrappedLines.size(), wrappedInfoLines.size());
+
+            for (size_t j = 0; j < rowCount; ++j) {
+                const std::string secLine  = (j < wrappedLines.size())     ? wrappedLines[j]     : "";
+                const std::string infoLine = (j < wrappedInfoLines.size()) ? wrappedInfoLines[j] : "";
+
+                outSection.push_back(secLine);
+                outInfo.push_back(infoLine);
+
+                lineInfoWidth = tsl::gfx::calculateStringWidth(infoLine, fontSize, false);
 
                 xPos = 0;
                 if (alignment == LEFT_STR) {
                     xPos = static_cast<int>(columnOffset);
                 } else if (alignment == RIGHT_STR) {
-                    xPos = static_cast<int>(xMax - infoWidth + (columnOffset - 160 + 1));
+                    xPos = static_cast<int>(xMax - lineInfoWidth + (columnOffset - 160 + 1));
                 } else {
-                    xPos = static_cast<int>(columnOffset + (xMax - infoWidth) / 2);
+                    xPos = static_cast<int>(columnOffset + (xMax - lineInfoWidth) / 2);
                 }
 
                 outX.push_back(xPos);
@@ -1297,8 +1352,15 @@ static bool buildTableDrawerLines(
                     preprocessPath(hexPath, packagePath);
                 }
                 else {
-                    baseSection.push_back(getTranslated(cmd[0]));
-                    baseInfo.push_back(getTranslated(cmd.size() > 1 ? cmd[1] : ""));
+                    if (!cmd[0].empty() && cmd[0][0] == ';') continue;
+                    if (cmd[0].empty() && cmd.size() > 2) {
+                        // {json(...)} prefix resolved to "" — shift: cmd[1]→col1, cmd[2]→col2
+                        baseSection.push_back(getTranslated(cmd[1]));
+                        baseInfo.push_back(getTranslated(cmd.size() > 2 ? cmd[2] : ""));
+                    } else {
+                        baseSection.push_back(getTranslated(cmd[0]));
+                        baseInfo.push_back(getTranslated(cmd.size() > 1 ? cmd[1] : ""));
+                    }
                 }
             }
         }
@@ -1633,7 +1695,7 @@ void addPackageInfo(tsl::elm::List* list, auto& packageHeader, std::string type 
     
     addField(_TITLE,        packageHeader.title,                  "none");
     addField(_VERSION,      packageHeader.version,                "none");
-    addField(creatorHeader, packageHeader.creator,                "none");
+    addField(creatorHeader, packageHeader.creator,                WORD_STR);
     addField(_ABOUT,        getTranslated(packageHeader.about),   defaultLang == "en" ? WORD_STR : CHAR_STR);
     addField(_CREDITS,      getTranslated(packageHeader.credits), WORD_STR);
     std::vector<std::vector<std::string>> dummyTableData;
@@ -2869,8 +2931,12 @@ void updateGeneralPlaceholders() {
     generalPlaceholders = {
         {"{ram_vendor}", memoryVendor},
         {"{ram_model}", memoryModel},
+        {"{ram_size_gb}", is8GBEnabled ? "8" : "4"},
         {"{ams_version}", amsVersion},
         {"{hos_version}", hosVersion},
+        {"{hekate_version}", hekateVersion},
+        {"{ovlloader_version}", ovlloaderVersion},
+        {"{ultrahand_version}", APP_VERSION},
         {"{package_version}", packageRootLayerVersion},
         {"{cpu_speedo}", ult::to_string(cpuSpeedo0)},
         {"{cpu_iddq}", ult::to_string(cpuIDDQ)},
@@ -2907,10 +2973,12 @@ bool applyPlaceholderReplacements(std::vector<std::string>& cmd, const std::stri
     
     std::vector<std::pair<std::string, std::function<std::string(const std::string&)>>> placeholders = {
         {"{hex_file(", [&](const std::string& placeholder) { 
+            if (hexPath.empty() || !isFileOrDirectory(hexPath)) return NULL_STR;
             std::string result = replaceHexPlaceholder(placeholder, hexPath);
             return returnOrNull(result);
         }},
         {"{ini_file(", [&](const std::string& placeholder) { 
+            if (iniPath.empty() || !isFileOrDirectory(iniPath)) return NULL_STR;
             std::string result = placeholder;
             applyReplaceIniPlaceholder(result, INI_FILE_STR, iniPath); 
             return result;
@@ -2928,12 +2996,14 @@ bool applyPlaceholderReplacements(std::vector<std::string>& cmd, const std::stri
             std::string indexStr;
             if (!getPlaceholderContent(placeholder, indexStr) || !isValidNumber(indexStr))
                 return NULL_STR;
+            if (listPath.empty() || !isFileOrDirectory(listPath)) return NULL_STR;
             return returnOrNull(getEntryFromListFile(listPath, ult::stoi(indexStr)));
         }},
         {"{json(", [&](const std::string& placeholder) { 
             return replaceJsonPlaceholder(placeholder, JSON_STR, jsonString);
         }},
         {"{json_file(", [&](const std::string& placeholder) { 
+            if (jsonPath.empty() || !isFileOrDirectory(jsonPath)) return NULL_STR;
             return replaceJsonPlaceholder(placeholder, JSON_FILE_STR, jsonPath);
         }},
         {"{timestamp(", [&](const std::string& placeholder) {
@@ -3078,6 +3148,15 @@ bool applyPlaceholderReplacements(std::vector<std::string>& cmd, const std::stri
         }},
         {"{math(", [&](const std::string& placeholder) { return handleMath(placeholder); }},
         {"{length(", [&](const std::string& placeholder) { return handleLength(placeholder); }},
+        {"{ovl_version(", [&](const std::string& placeholder) {
+            std::string ovlPath;
+            if (!getPlaceholderContent(placeholder, ovlPath)) return NULL_STR;
+            removeQuotes(ovlPath);
+            trim(ovlPath);
+            if (ovlPath.empty()) return NULL_STR;
+            const auto& [result, _ovlName, version, _lib, _ams] = getOverlayInfo(ovlPath);
+            return result != ResultSuccess ? NULL_STR : returnOrNull(version);
+        }},
     };
 
     updateGeneralPlaceholders();
@@ -3534,6 +3613,28 @@ void handleMakeDirCommand(const std::vector<std::string>& cmd, const std::string
     }
 }
 
+// If destPath exactly matches a PROTECTED_FILES entry, redirects it to destPath + ".ultra"
+// BEFORE the operation so the live file is never touched.
+// For directory destinations (unzip, dir copy), renames any protected file that landed
+// at its exact path after the operation.
+static inline void redirectIfProtected(std::string& destPath) {
+    for (const std::string& file : PROTECTED_FILES) {
+        if (destPath == file) {
+            destPath += ".ultra";
+            return;
+        }
+    }
+}
+
+static inline void stageProtectedFromDir(const std::string& destPath) {
+    if (destPath.empty() || destPath.back() != '/') return;
+    for (const std::string& file : PROTECTED_FILES) {
+        if (file.compare(0, destPath.size(), destPath) == 0 && isFile(file)) {
+            rename(file.c_str(), (file + ".ultra").c_str());
+        }
+    }
+}
+
 void handleCopyCommand(const std::vector<std::string>& cmd, const std::string& packagePath) {
     // Declare only the strings we always need
     std::string sourceListPath, destinationListPath, logSource, logDestination, sourcePath, destinationPath, copyFilterListPath, filterListPath;
@@ -3565,6 +3666,7 @@ void handleCopyCommand(const std::vector<std::string>& cmd, const std::string& p
             const bool shouldCopy = !filterSet || filterSet->find(sourcePath) == filterSet->end();
             
             if (shouldCopy) {
+                redirectIfProtected(destinationPath);
                 const long long totalSize = getTotalSize(sourcePath);
                 long long totalBytesCopied = 0;
                 copyFileOrDirectory(sourcePath, destinationPath, &totalBytesCopied, totalSize);
@@ -3595,7 +3697,9 @@ void handleCopyCommand(const std::vector<std::string>& cmd, const std::string& p
                 filterSet = std::make_unique<std::unordered_set<std::string>>(readSetFromFile(filterListPath, packagePath));
             }
             copyFileOrDirectoryByPattern(sourcePath, destinationPath, logSource, logDestination, filterSet.get());
+            stageProtectedFromDir(destinationPath);
         } else {
+            redirectIfProtected(destinationPath);
             const long long totalSize = getTotalSize(sourcePath);
             long long totalBytesCopied = 0;
             copyFileOrDirectory(sourcePath, destinationPath, &totalBytesCopied, totalSize, logSource, logDestination);
@@ -3791,10 +3895,12 @@ void handleMoveCommand(const std::vector<std::string>& cmd, const std::string& p
                     const bool shouldCopy = copyFilterSet && copyFilterSet->find(sourcePath) != copyFilterSet->end();
                     
                     if (shouldCopy) {
+                        redirectIfProtected(destinationPath);
                         const long long totalSize = getTotalSize(sourcePath);
                         long long totalBytesCopied = 0;
                         copyFileOrDirectory(sourcePath, destinationPath, &totalBytesCopied, totalSize);
                     } else {
+                        redirectIfProtected(destinationPath);
                         moveFileOrDirectory(sourcePath, destinationPath, logSource, logDestination);
                     }
                 } else {
@@ -3837,9 +3943,10 @@ void handleMoveCommand(const std::vector<std::string>& cmd, const std::string& p
             if (!filterListPath.empty()) {
                 filterSet = std::make_unique<std::unordered_set<std::string>>(readSetFromFile(filterListPath, packagePath));
             }
-            
             moveFilesOrDirectoriesByPattern(sourcePath, destinationPath, logSource, logDestination, filterSet.get());
+            stageProtectedFromDir(destinationPath);
         } else {
+            redirectIfProtected(destinationPath);
             moveFileOrDirectory(sourcePath, destinationPath, logSource, logDestination);
         }
     }
@@ -4210,11 +4317,15 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
                         std::string iniPath = secondArg;
                         preprocessPath(iniPath, packagePath);
                         
+                        const size_t lastSlash = iniPath.find_last_of('/');
+                        const std::string iniPackagePath = (lastSlash != std::string::npos)
+                            ? iniPath.substr(0, lastSlash + 1) : packagePath;
+                        
                         bool resetCommandSuccess = false;
                         if (!commandSuccess.load(std::memory_order_acquire))
                             resetCommandSuccess = true;
                         
-                        executeIniCommands(iniPath, sectionName, packagePath);
+                        executeIniCommands(iniPath, sectionName, iniPackagePath);
                         
                         if (resetCommandSuccess)
                             setCommandFailed();
@@ -4235,25 +4346,52 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
             }
             if (commandName == "exit") {
                 if (cmdSize >= 2) {
+                    // Explicit destination: close overlay and relaunch into the requested tab.
                     const std::string selection = getUnquoted(cmd, 1);
-                    if (selection == "overlays") {
+                    if (selection == "to_overlays") {
                         setIniFileValue(ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, IN_OVERLAY_STR, TRUE_STR);
-                    } else if (selection == "packages") {
+                        exitingUltrahand.store(true, std::memory_order_release);
+                        ult::launchingOverlay.store(true, std::memory_order_release);
+                        tsl::setNextOverlay(OVERLAY_PATH+"ovlmenu.ovl");
+                        tsl::Overlay::get()->close(true);
+                    } else if (selection == "to_packages") {
                         setIniFileValue(ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, "to_packages", TRUE_STR);
                         setIniFileValue(ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, IN_OVERLAY_STR, TRUE_STR);
+                        exitingUltrahand.store(true, std::memory_order_release);
+                        ult::launchingOverlay.store(true, std::memory_order_release);
+                        tsl::setNextOverlay(OVERLAY_PATH+"ovlmenu.ovl");
+                        tsl::Overlay::get()->close(true);
+                    } else if (selection == "package") {
+                        // Bare `exit package`: signal the UI thread to return to the packages menu instantly.
+                        // PackageMenu::handleInput() will drain returnContextStack, identify the
+                        // originating package folder, and swapTo<MainMenu> on the packages tab with
+                        // the cursor positioned on the correct package entry.
+                        triggerReturnToPackages.store(true, std::memory_order_release);
+                    } if (selection == "ovlloader") {
+                        if (requestOverlayExit()) {
+                            exitingUltrahand.store(true, std::memory_order_release);
+                            ult::launchingOverlay.store(true, std::memory_order_release);
+                            tsl::setNextOverlay(OVERLAY_PATH+"ovlmenu.ovl");
+                            tsl::Overlay::get()->close(true);
+                        }
                     }
+                    // Unknown arg: no-op (fall through to return)
+                } else {
+                    exitingUltrahand.store(true, std::memory_order_release);
+                    ult::launchingOverlay.store(true, std::memory_order_release);
+                    tsl::setNextOverlay(OVERLAY_PATH+"ovlmenu.ovl");
+                    tsl::Overlay::get()->close(true);
                 }
-                exitingUltrahand.store(true, std::memory_order_release);
-                ult::launchingOverlay.store(true, std::memory_order_release);
-                tsl::setNextOverlay(OVERLAY_PATH+"ovlmenu.ovl");
-                tsl::Overlay::get()->close(true);
                 return;
             }
 
             break;
             
         case 'f':
-            if (commandName == "flag") {
+            if (commandName == "force_failure") {
+                commandSuccess.store(false, std::memory_order_release);
+                return;
+            } if (commandName == "flag") {
                 if (cmdSize >= 3) {
                     std::string wildcardPattern = cmd[1];
                     preprocessPath(wildcardPattern, packagePath);
@@ -4516,6 +4654,19 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
                 return;
             }
             if (commandName == "reboot") {
+                if (cmdSize == 2) {
+                    const std::string rebootPattern = getUnquoted(cmd, 1);
+                    if (rebootPattern == "ovlloader") {
+                        if (requestOverlayReload()) {
+                            exitingUltrahand.store(true, std::memory_order_release);
+                            ult::launchingOverlay.store(true, std::memory_order_release);
+                            tsl::setNextOverlay(OVERLAY_PATH+"ovlmenu.ovl");
+                            tsl::Overlay::get()->close(true);
+                        }
+                        return;
+                    }
+                }
+
                 bool launchUpdaterPayload = false;
                 for (const std::string& file : PROTECTED_FILES) {
                     if (isFile(file + ".ultra")) {
@@ -4601,6 +4752,7 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
                 spsmExit();
                 return;
             }
+
             break;
             
         case 's':

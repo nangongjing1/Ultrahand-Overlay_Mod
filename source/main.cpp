@@ -87,10 +87,12 @@ static size_t nestedMenuCount = 0;
 
 // Command mode globals
 static const std::array<std::string_view, 3> commandSystems = {DEFAULT_STR, ERISTA_STR, MARIKO_STR};
+static const std::array<std::string_view, 3> commandRAMSizes = {DEFAULT_STR, "4", "8"};
 static const std::array<std::string_view, 11> commandModes = {DEFAULT_STR, HOLD_STR, SLOT_STR, TOGGLE_STR, OPTION_STR, FORWARDER_STR, TEXT_STR, TABLE_STR, TRACKBAR_STR, STEP_TRACKBAR_STR, NAMED_STEP_TRACKBAR_STR};
 static const std::array<std::string_view, 6> commandGroupings = {DEFAULT_STR, "split", "split2", "split3", "split4", "split5"};
 
 constexpr std::string_view SYSTEM_PATTERN = ";system=";
+constexpr std::string_view RAM_SIZE_GB_PATTERN = ";ram_size_gb=";
 constexpr std::string_view STATE_PATTERN = ";state=";
 constexpr std::string_view HOS_VERSION_PATTERN = ";hos_version=";
 constexpr std::string_view AMS_VERSION_PATTERN = ";ams_version=";
@@ -134,6 +136,7 @@ constexpr std::string_view ON_EVERY_TICK_PATTERN = ";on_every_tick=";
 
 
 constexpr size_t SYSTEM_PATTERN_LEN = SYSTEM_PATTERN.size();
+constexpr size_t RAM_SIZE_GB_PATTERN_LEN = RAM_SIZE_GB_PATTERN.size();
 constexpr size_t STATE_PATTERN_LEN = STATE_PATTERN.size();
 constexpr size_t HOS_VERSION_PATTERN_LEN = HOS_VERSION_PATTERN.size();
 constexpr size_t AMS_VERSION_PATTERN_LEN = AMS_VERSION_PATTERN.size();
@@ -179,6 +182,7 @@ static std::string lastMenuMode = "";
 static std::string lastKeyName = "";
 static bool hideUserGuide = false;
 static bool hidePackages = false;
+bool toPackages = false;
 static bool hideDelete = false;
 static bool hideUnsupported = false;
 
@@ -664,6 +668,10 @@ static void handleTriggerExit() {
     }
 }
 
+// Defined after returnContextStack is declared (~line 4179); forward-declared
+// here so ScriptOverlay::handleInput() (which precedes that point) can call it.
+static bool handleTriggerReturnToPackages(const std::string& packagePath);
+
 // The interpreter hold-and-launch pattern shared by SelectionOverlay,
 // PackageMenu, and MainMenu. The callers differ only in the path string
 // passed to executeInterpreterCommands; all other logic is identical.
@@ -835,6 +843,19 @@ private:
                 if (executingCommands && commandSuccess.load(acquire)) {
                     softwareHasUpdated = true;
                     triggerMenuReload = true;
+
+                    // Handle nx-ovlloader reloading if necessary
+                    const std::string versionBefore = cleanVersionLabel(loaderInfo);
+                    const std::string versionAfter  = cleanVersionLabel(extractVersionFromBinary("/atmosphere/contents/420000000007E51A/exefs.nsp"));
+                    if (!versionAfter.empty() && versionAfter != versionBefore) {
+                        if (requestOverlayReload()) {
+                            exitingUltrahand.store(true, std::memory_order_release);
+                            ult::launchingOverlay.store(true, std::memory_order_release);
+                            tsl::setNextOverlay(OVERLAY_PATH+"ovlmenu.ovl");
+                            tsl::Overlay::get()->close(true);
+                            return true;
+                        }
+                    }
                 }
                 executingCommands = false;
             }
@@ -2984,6 +3005,7 @@ public:
         }
         
         handleTriggerExit();
+        if (handleTriggerReturnToPackages(filePath)) return true;
         
         return false;
     }
@@ -4038,17 +4060,23 @@ public:
                 }
                 
                 // Handle package config footer logic
-                if (commandMode == OPTION_STR && isFile(packageConfigIniPath)) {
-                    const auto packageConfigData = getParsedDataFromIniFile(packageConfigIniPath);
-                    auto it = packageConfigData.find(specificKey);
-                    if (it != packageConfigData.end()) {
-                        auto& optionSection = it->second;
-                        auto footerIt = optionSection.find(FOOTER_STR);
-                        if (footerIt != optionSection.end() && (footerIt->second.find(NULL_STR) == std::string::npos)) {
-                            if (selectedListItem)
-                                selectedListItem->setValue(footerIt->second);
+                if (commandMode == OPTION_STR) {
+                    std::string restoreFooter = OPTION_SYMBOL; // default: never-set indicator
+                    if (isFile(packageConfigIniPath)) {
+                        const auto packageConfigData = getParsedDataFromIniFile(packageConfigIniPath);
+                        auto it = packageConfigData.find(specificKey);
+                        if (it != packageConfigData.end()) {
+                            auto& optionSection = it->second;
+                            auto footerIt = optionSection.find(FOOTER_STR);
+                            if (footerIt != optionSection.end() &&
+                                !footerIt->second.empty() &&
+                                footerIt->second.find(NULL_STR) == std::string::npos) {
+                                restoreFooter = footerIt->second;
+                            }
                         }
                     }
+                    if (selectedListItem)
+                        selectedListItem->setValue(restoreFooter);
                 }
 
                 tsl::goBack();
@@ -4239,6 +4267,63 @@ static CommandSettings parseCommandSettings(std::vector<std::vector<std::string>
 
 static std::stack<ReturnContext> returnContextStack;
 
+// Shared handler for the bare `exit` command.  Drains returnContextStack to
+// find the originating package, resets all navigation state, and swaps
+// directly to MainMenu on the packages tab with the cursor on that package.
+// Called from both PackageMenu::handleInput() and ScriptOverlay::handleInput().
+// Returns true when the flag was set so the caller can propagate.
+[[gnu::noinline]]
+static bool handleTriggerReturnToPackages(const std::string& packagePath) {
+    if (!triggerReturnToPackages.exchange(false, std::memory_order_acq_rel))
+        return false;
+
+    // Walk the forwarder stack to find the root package path.
+    // The bottom entry is where the user originally entered from the packages menu;
+    // if the stack is empty we are already at the root level.
+    std::string rootPkgPath = packagePath;
+    while (!returnContextStack.empty()) {
+        rootPkgPath = returnContextStack.top().packagePath;
+        returnContextStack.pop();
+    }
+
+    if (!selectedPackage.empty()) {
+        // Launched via --package arg: no packages menu to return to — close normally.
+        ult::launchingOverlay.store(true, std::memory_order_release);
+        exitingUltrahand.store(true, std::memory_order_release);
+        tsl::setNextOverlay(OVERLAY_PATH + "ovlmenu.ovl");
+        tsl::Overlay::get()->close();
+        return true;
+    }
+
+    // Strip trailing slash — getNameFromPath returns "" for trailing-slash paths.
+    if (!rootPkgPath.empty() && rootPkgPath.back() == '/')
+        rootPkgPath.pop_back();
+    comboReturnPackageName = getNameFromPath(rootPkgPath);
+
+    // Reset all navigation state.
+    nestedMenuCount = 0;
+    inPackageMenu   = false;
+    inSubPackageMenu = false;
+    inScriptMenu    = false;
+    inSelectionMenu = false;
+    returningToMain        = false;
+    returningToHiddenMain  = false;
+    jumpItemName.clear();
+    jumpItemValue.clear();
+
+    // Route to the correct tab.
+    // createPackagesMenu picks up comboReturnPackageName and positions the cursor.
+    if (inHiddenMode.load(std::memory_order_acquire)) {
+        setUltrahandConfig(IN_HIDDEN_PACKAGE_STR, TRUE_STR);
+    } else {
+        toPackages = true;
+    }
+
+    pendingExitPackage.store(true, std::memory_order_release);
+    tsl::swapTo<MainMenu>();
+    return true;
+}
+
 
 class PackageMenu; // forwarding
 
@@ -4281,6 +4366,7 @@ bool drawCommandsMenu(
     bool isHold;
 
     std::string commandSystem;
+    std::string commandRAMSize;
     std::string commandState;
     std::string commandHOSFirmware;
     std::string commandAMSFirmware;
@@ -4395,6 +4481,7 @@ bool drawCommandsMenu(
         commandFooterHighlightDefined = false;
         isHold = false;
         commandSystem = DEFAULT_STR;
+        commandRAMSize = DEFAULT_STR;
         commandState = DEFAULT_STR;
         commandHOSFirmware = "";
         commandAMSFirmware = "";
@@ -4847,6 +4934,14 @@ bool drawCommandsMenu(
                                 if (parseBoolFlag(commandName, WRAPPING_INDENT_PATTERN, useWrappingIndent)) continue;
                                 break;
                                 
+                            case 'r':
+                                if (commandName.compare(0, RAM_SIZE_GB_PATTERN_LEN, RAM_SIZE_GB_PATTERN) == 0) {
+                                    commandRAMSize = commandName.substr(RAM_SIZE_GB_PATTERN_LEN);
+                                    if (std::find(commandRAMSizes.begin(), commandRAMSizes.end(), commandRAMSize) == commandRAMSizes.end())
+                                        commandRAMSize = commandRAMSizes[0];
+                                    continue;
+                                }
+                                break;
                             case 'u':
                                 if (commandName.compare(0, UNITS_PATTERN_LEN, UNITS_PATTERN) == 0) {
                                     units = commandName.substr(UNITS_PATTERN_LEN);
@@ -4986,6 +5081,10 @@ bool drawCommandsMenu(
             if (commandSystem == ERISTA_STR && !usingErista) {
                 skipSystem = true;
             } else if (commandSystem == MARIKO_STR && !usingMariko) {
+                skipSystem = true;
+            } else if (commandRAMSize == "4" && is8GBEnabled) {
+                skipSystem = true;
+            } else if (commandRAMSize == "8" && !is8GBEnabled) {
                 skipSystem = true;
             } else if (commandState == DOCKED_STR && !isDocked) {
                 skipSystem = true;
@@ -5342,14 +5441,23 @@ bool drawCommandsMenu(
                                     selectedListItem = listItem;
                                     
                                     std::string newKey = "";
+                                    // Normalize footer for option-mode checkmark matching:
+                                    // SelectionOverlay splits items on " - " and uses only the left
+                                    // part (itemName) for comparison. Seed selectedFooterDict with
+                                    // that same left part so boot_package-written footers like
+                                    // "18 - (0)" correctly match itemName "18".
+                                    const auto normalizeFooterKey = [](const std::string& f) -> std::string {
+                                        const size_t dashPos = f.find(" - ");
+                                        return (dashPos != std::string::npos) ? f.substr(0, dashPos) : f;
+                                    };
                                     if (inPackageMenu) {
                                         newKey = lastSection + keyName;
                                         if (selectedFooterDict.find(newKey) == selectedFooterDict.end())
-                                            selectedFooterDict[newKey] = footer;
+                                            selectedFooterDict[newKey] = normalizeFooterKey(footer);
                                     } else {
                                         newKey = "sub_" + lastSection + keyName;
                                         if (selectedFooterDict.find(newKey) == selectedFooterDict.end())
-                                            selectedFooterDict[newKey] = footer;
+                                            selectedFooterDict[newKey] = normalizeFooterKey(footer);
                                     }
                                     
                                     if (commandMode == OPTION_STR || commandMode == SLOT_STR) {
@@ -5616,7 +5724,7 @@ public:
     ~PackageMenu() {
         //std::lock_guard<std::mutex> lock(transitionMutex);
 
-        if (returningToMain || returningToHiddenMain) {
+        if (returningToMain || returningToHiddenMain || pendingExitPackage.load(std::memory_order_acquire)) {
             lastOpenPackagePath.clear();  // no longer in a package
             tsl::clearGlyphCacheNow.store(true, release);
             clearMemory();
@@ -6050,6 +6158,9 @@ public:
             tsl::setNextOverlay(OVERLAY_PATH+"ovlmenu.ovl");
             tsl::Overlay::get()->close();
         }
+
+        // Bare `exit` command: return instantly to the packages menu.
+        if (handleTriggerReturnToPackages(packagePath)) return true;
         
         // Fallback for lost navigations
         if (backKeyPressed) {
@@ -6080,7 +6191,6 @@ public:
 };
 
 bool triggerBootCommands = true;
-bool toPackages = false;
 bool inOverlay = false;
 bool isComboReturnFrom = false;    // set when --comboReturnFrom was passed; gated on useLaunchRecall in loadInitialGui
 bool isComboReturnPackage = false; // set when --comboReturnPackage was passed; gated on useLaunchRecall in loadInitialGui
@@ -7267,7 +7377,6 @@ void initializeSettingsAndDirectories() {
     ensureDefault("hide_soc_temp",            TRUE_STR);
     ensureDefault("dynamic_widget_colors",    TRUE_STR);
     ensureDefault("hide_widget_backdrop",     FALSE_STR);
-    ensureDefault("hide_widget_border",       FALSE_STR);
     ensureDefault("center_widget_alignment",  TRUE_STR);
     ensureDefault("extended_widget_backdrop", FALSE_STR);
     ensureDefault("datetime_format",          DEFAULT_DT_FORMAT);
@@ -7533,8 +7642,9 @@ public:
     virtual void exitServices() override {
         closeInterpreterThread(); // just in case ¯\_(ツ)_/¯
 
-        if (exitingUltrahand.load(acquire) && !reloadingBoot)
+        if ((exitingUltrahand.load(acquire) || pendingExitPackage.load(acquire)) && !reloadingBoot)
             executeIniCommands(PACKAGE_PATH + EXIT_PACKAGE_FILENAME, "exit");
+        pendingExitPackage.store(false, std::memory_order_release); // consumed
 
         curl_global_cleanup(); // safe cleanup
     }
