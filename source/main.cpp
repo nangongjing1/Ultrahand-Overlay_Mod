@@ -93,7 +93,7 @@ static const std::array<std::string_view, 6> commandGroupings = {DEFAULT_STR, "s
 
 constexpr std::string_view SYSTEM_PATTERN = ";system=";
 constexpr std::string_view RAM_SIZE_GB_PATTERN = ";ram_size_gb=";
-constexpr std::string_view STATE_PATTERN = ";state=";
+constexpr std::string_view DEVICE_STATE_PATTERN = ";device_state=";
 constexpr std::string_view HOS_VERSION_PATTERN = ";hos_version=";
 constexpr std::string_view AMS_VERSION_PATTERN = ";ams_version=";
 constexpr std::string_view MODE_PATTERN = ";mode=";
@@ -101,6 +101,9 @@ constexpr std::string_view GROUPING_PATTERN = ";grouping=";
 constexpr std::string_view FOOTER_PATTERN = ";footer=";
 constexpr std::string_view FOOTER_HIGHLIGHT_PATTERN = ";footer_highlight=";
 constexpr std::string_view HOLD_PATTERN = ";hold=";
+
+constexpr std::string_view VISIBILITY_CONDITION_PATTERN = ";visibility_condition=";
+constexpr std::string_view TOGGLE_STATE_CONDITION_PATTERN = ";toggle_state_condition=";
 
 constexpr std::string_view MINI_PATTERN = ";mini=";
 constexpr std::string_view SELECTION_MINI_PATTERN = ";selection_mini=";
@@ -137,7 +140,7 @@ constexpr std::string_view ON_EVERY_TICK_PATTERN = ";on_every_tick=";
 
 constexpr size_t SYSTEM_PATTERN_LEN = SYSTEM_PATTERN.size();
 constexpr size_t RAM_SIZE_GB_PATTERN_LEN = RAM_SIZE_GB_PATTERN.size();
-constexpr size_t STATE_PATTERN_LEN = STATE_PATTERN.size();
+constexpr size_t DEVICE_STATE_PATTERN_LEN = DEVICE_STATE_PATTERN.size();
 constexpr size_t HOS_VERSION_PATTERN_LEN = HOS_VERSION_PATTERN.size();
 constexpr size_t AMS_VERSION_PATTERN_LEN = AMS_VERSION_PATTERN.size();
 constexpr size_t MODE_PATTERN_LEN = MODE_PATTERN.size();
@@ -145,6 +148,8 @@ constexpr size_t GROUPING_PATTERN_LEN = GROUPING_PATTERN.size();
 constexpr size_t FOOTER_PATTERN_LEN = FOOTER_PATTERN.size();
 constexpr size_t FOOTER_HIGHLIGHT_PATTERN_LEN = FOOTER_HIGHLIGHT_PATTERN.size();
 constexpr size_t HOLD_PATTERN_LEN = HOLD_PATTERN.size();
+constexpr size_t VISIBILITY_CONDITION_PATTERN_LEN = VISIBILITY_CONDITION_PATTERN.size();
+constexpr size_t TOGGLE_STATE_CONDITION_PATTERN_LEN = TOGGLE_STATE_CONDITION_PATTERN.size();
 constexpr size_t MINI_PATTERN_LEN = MINI_PATTERN.size();
 constexpr size_t SELECTION_MINI_PATTERN_LEN = SELECTION_MINI_PATTERN.size();
 constexpr size_t PROGRESS_PATTERN_LEN = PROGRESS_PATTERN.size();
@@ -432,6 +437,7 @@ bool handleRunningInterpreter(uint64_t& keysDown, uint64_t& keysHeld) {
 
 
 static u64 holdStartTick = 0;
+static u64 holdDurationMs = 0;
 static std::string lastSelectedListItemFooter;
 static std::vector<std::vector<std::string>> storedCommands;
 static bool holdRumbleFired[3] = {false, false, false}; // guards for the ~33%, ~66%, ~100% rumble pulses
@@ -493,7 +499,7 @@ bool processHold(uint64_t keysDown, uint64_t keysHeld, u64& holdStartTick, bool&
     
     // Update hold progress
     const u64 elapsedMs = armTicksToNs(armGetSystemTick() - holdStartTick) / 1000000;
-    const int percentage = std::min(100, static_cast<int>((elapsedMs * 100) / 3000));
+    const int percentage = std::min(100, static_cast<int>((elapsedMs * 100) / holdDurationMs));
     displayPercentage.store(percentage, std::memory_order_release);
     
     // Threshold-crossing rumble pulses — fired at ~33%, ~66%, ~100% of the hold.
@@ -565,7 +571,7 @@ static void handleWallpaperReload() {
 [[gnu::noinline]]
 static bool handleGoBackAfter() {
     if (goBackAfter.exchange(false, std::memory_order_acq_rel)) {
-        disableSound.store(true, std::memory_order_release);
+        suppressNextBackFeedback.store(true, std::memory_order_release);
         simulatedBack.store(true, std::memory_order_release);
         return true;
     }
@@ -680,14 +686,18 @@ static bool handleTriggerReturnToPackages(const std::string& packagePath);
 static bool handleCommandHold(uint64_t keysDown, uint64_t keysHeld, const std::string& cmdPath) {
     bool isHolding = (lastCommandIsHold && runningInterpreter.load(std::memory_order_acquire));
     if (!isHolding) return false;
-    processHold(keysDown, keysHeld, holdStartTick, isHolding, [&cmdPath]() {
+    const bool isToggleHold = (lastCommandMode == TOGGLE_STR);
+    processHold(keysDown, keysHeld, holdStartTick, isHolding, [&cmdPath, isToggleHold]() {
         displayPercentage.store(-1, std::memory_order_release);
         lastCommandIsHold = false;
         lastSelectedListItem->setValue(INPROGRESS_SYMBOL);
-        triggerEnterFeedback();
+        if (isToggleHold)
+            nextToggleState == CAPITAL_ON_STR ? triggerOnFeedback() : triggerOffFeedback();
+        else
+            triggerEnterFeedback();
         executeInterpreterCommands(std::move(storedCommands), cmdPath, lastKeyName);
         lastRunningInterpreter.store(true, std::memory_order_release);
-    }, nullptr, true);
+    }, isToggleHold ? []() { nextToggleState.clear(); } : std::function<void()>(nullptr), true);
     return true;
 }
 
@@ -1822,24 +1832,56 @@ public:
                 auto it = ultrahandSection.find(key);
                 return (it != ultrahandSection.end()) ? (it->second == TRUE_STR) : defaultValue;
             };
-            
-            addHeader(list, FEATURES);
+
+            addHeader(list, INPUT_SETTINGS);
+
             useLaunchCombos = getBoolValue("launch_combos", true); // TRUE_STR default
             createToggleListItem(list, LAUNCH_COMBOS, useLaunchCombos, "launch_combos");
+
+            useSwipeToOpen = getBoolValue("swipe_to_open", true); // TRUE_STR default
+            createToggleListItem(list, SWIPE_TO_OPEN, useSwipeToOpen, "swipe_to_open");
 
             useHapticFeedback = getBoolValue("haptic_feedback", false); // FALSE_STR default
             createToggleListItem(list, HAPTIC_FEEDBACK, useHapticFeedback, "haptic_feedback");
 
-            useAutoNTPSync = getBoolValue("auto_ntp_sync", true); // FALSE_STR default
-            createToggleListItem(list, AUTO_NTP_SYNC, useAutoNTPSync, "auto_ntp_sync");
+            useStickNavigation = getBoolValue("stick_navigation", true);
+            createToggleListItem(list, STICK_NAVIGATION, useStickNavigation, "stick_navigation");
+            std::vector<std::string> holdLabels = {"0.5s", "1.0s", "1.5s", "2.0s", "2.5s", "3.0s", "3.5s", "4.0s", "4.5s", "5.0s"};
+            auto* holdDurationTrackbar = new tsl::elm::NamedStepTrackBarV2(
+                HOLD_DURATION,
+                "",
+                holdLabels,
+                nullptr, nullptr, {}, "",
+                false,
+                false
+            );
+            holdDurationTrackbar->setSimpleCallback([this](s16 /*value*/, s16 index) {
+                u32 newVal = (index + 1) * 500;
+                holdDurationMs = newVal;
+                setUltrahandConfig("hold_duration", std::to_string(newVal));
+            });
+            {
+                auto it = ultrahandSection.find("hold_duration");
+                const u32 storedMs = (it != ultrahandSection.end() && !it->second.empty())
+                    ? static_cast<u32>(std::max(500, std::min(ult::stoi(it->second), 5000)))
+                    : 3000u;
+                holdDurationMs = storedMs;
+                const u8 progress = static_cast<u8>(std::min((storedMs / 500u) - 1u, 9u));
+                holdDurationTrackbar->setProgress(progress);
+                holdDurationTrackbar->disableClickAnimation();
+            }
+            list->addItem(holdDurationTrackbar);
+
+            addHeader(list, FEATURE_SETTINGS);
 
             useOpaqueScreenshots = getBoolValue("opaque_screenshots", true); // TRUE_STR default
             createToggleListItem(list, OPAQUE_SCREENSHOTS, useOpaqueScreenshots, "opaque_screenshots");
-            useSwipeToOpen = getBoolValue("swipe_to_open", true); // TRUE_STR default
-            createToggleListItem(list, SWIPE_TO_OPEN, useSwipeToOpen, "swipe_to_open");
+
             rightAlignmentState = useRightAlignment = getBoolValue("right_alignment"); // FALSE_STR default
             createToggleListItem(list, RIGHT_SIDE_MODE, useRightAlignment, "right_alignment");
 
+            useAutoNTPSync = getBoolValue("auto_ntp_sync", true); // FALSE_STR default
+            createToggleListItem(list, NTP_SYNC_DOWNLOADS, useAutoNTPSync, "auto_ntp_sync");
 
             addHeader(list, MENU_SETTINGS);
             hidePackages = getBoolValue("hide_packages", false); // FALSE_STR default
@@ -1857,10 +1899,10 @@ public:
 
             usePageSwap = getBoolValue("page_swap", false); // FALSE_STR default
             createToggleListItem(list, PAGE_SWAP, usePageSwap, "page_swap", false, true);
-            usePageRecall = getBoolValue("page_recall", true); // TRUE_STR default
-            createToggleListItem(list, PAGE_RECALL, usePageRecall, "page_recall");
-            useLaunchRecall = getBoolValue("launch_recall", true); // TRUE_STR default
-            createToggleListItem(list, LAUNCH_RECALL, useLaunchRecall, "launch_recall");
+            //usePageRecall = getBoolValue("page_recall", true); // TRUE_STR default
+            //createToggleListItem(list, PAGE_RECALL, usePageRecall, "page_recall");
+            //useLaunchRecall = getBoolValue("launch_recall", true); // TRUE_STR default
+            //createToggleListItem(list, LAUNCH_RECALL, useLaunchRecall, "launch_recall");
 
             hideOverlayVersions = getBoolValue("hide_overlay_versions", false); // FALSE_STR default
             createToggleListItem(list, OVERLAY_VERSIONS, hideOverlayVersions, "hide_overlay_versions", true, true);
@@ -3068,6 +3110,30 @@ private:
 
 // Set to globals for reduced lambda overhead
 
+struct ReturnContext {
+    std::string packagePath;
+    std::string sectionName;
+    std::string currentPage;
+    std::string packageName;
+    std::string pageHeader;
+    std::string option;
+    size_t nestedLayer = 0;
+
+    void clear() {
+        packagePath.clear();
+        sectionName.clear();
+        currentPage.clear();
+        packageName.clear();
+        pageHeader.clear();
+        option.clear();
+        nestedLayer = 0;
+    }
+};
+
+static std::stack<ReturnContext> returnContextStack;
+
+class PackageMenu; // forward declaration
+
 /**
  * @brief The `SelectionOverlay` class manages the selection overlay functionality.
  *
@@ -3160,7 +3226,6 @@ public:
         std::string filterEntry;
         std::vector<std::string> matchedFiles, tempFiles;
 
-        bool afterSource = false;
         
         for (auto& cmd : selectionCommands) {
 
@@ -3185,6 +3250,12 @@ public:
             if ((inEristaSection && !inMarikoSection && usingErista) || 
                 (!inEristaSection && inMarikoSection && usingMariko) || 
                 (!inEristaSection && !inMarikoSection)) {
+                
+                // Menu-item directives are resolved at render time; skip them here.
+                if (commandName.compare(0, VISIBILITY_CONDITION_PATTERN_LEN, VISIBILITY_CONDITION_PATTERN) == 0 ||
+                    commandName.compare(0, TOGGLE_STATE_CONDITION_PATTERN_LEN, TOGGLE_STATE_CONDITION_PATTERN) == 0) {
+                    continue;
+                }
                 
                 // Optimized pattern matching with bounds checking
                 if (commandName.size() > MODE_PATTERN_LEN && 
@@ -3216,10 +3287,11 @@ public:
                 }
     
                 if (cmd.size() > 1) {
-                    // Apply ALL placeholder replacements using the comprehensive function
-                    // This handles nesting, recursion, and proper order automatically
-                    if (!afterSource)
-                        applyPlaceholderReplacements(cmd, _hexFilePath, _iniFilePath, _listString, _listFilePath, _jsonString, _jsonFilePath);
+                    // Apply ALL placeholder replacements using the comprehensive function.
+                    // Runs unconditionally — including on _source commands — so any accumulated
+                    // variable placeholder (ini_file, hex_file, json, list, if_*, math, etc.)
+                    // can be used to compose a _source path or value.
+                    applyPlaceholderReplacements(cmd, _hexFilePath, _iniFilePath, _listString, _listFilePath, _jsonString, _jsonFilePath, filePath);
     
                     // Now handle source declarations
                     if (commandName == "ini_file") {
@@ -3285,8 +3357,6 @@ public:
                         if (currentSection == GLOBAL_STR) {
                             pathPattern = cmd[1];
                             preprocessPath(pathPattern, filePath);
-                            updateGeneralPlaceholders();
-                            replacePlaceholdersInArg(pathPattern, generalPlaceholders);
                             // Get files directly, avoid storing in intermediate variable
                             tempFiles.clear();
                             tempFiles = getFilesListByWildcards(pathPattern, maxItemsLimit);
@@ -3312,7 +3382,6 @@ public:
                                               std::make_move_iterator(tempFiles.end()));
                             sourceTypeOff = FILE_STR;
                         }
-                        afterSource = true;
                     } else if (commandName == "json_file_source") {
                         sourceType = JSON_FILE_STR;
                         if (currentSection == GLOBAL_STR) {
@@ -3333,7 +3402,6 @@ public:
                             if (cmd.size() > 2)
                                 jsonKeyOff = cmd[2];
                         }
-                        afterSource = true;
                     } else if (commandName == "list_file_source") {
                         sourceType = LIST_FILE_STR;
                         if (currentSection == GLOBAL_STR) {
@@ -3348,7 +3416,6 @@ public:
                             preprocessPath(listPathOff, filePath);
                             sourceTypeOff = LIST_FILE_STR;
                         }
-                        afterSource = true;
                     } else if (commandName == "list_source") {
                         sourceType = LIST_STR;
                         if (currentSection == GLOBAL_STR) {
@@ -3363,22 +3430,26 @@ public:
                             removeQuotes(listStringOff);
                             sourceTypeOff = LIST_STR;
                         }
-                        afterSource = true;
                     } else if (commandName == "ini_file_source") {
-                        sourceType = INI_FILE_STR;
                         if (currentSection == GLOBAL_STR) {
+                            sourceType = INI_FILE_STR;
                             iniPath = cmd[1];
                             preprocessPath(iniPath, filePath);
+                            parseSectionsFromIniPattern(iniPath, filesList, maxItemsLimit);
+                            iniPath.clear();
                         } else if (currentSection == ON_STR) {
+                            sourceTypeOn = INI_FILE_STR;
                             iniPathOn = cmd[1];
                             preprocessPath(iniPathOn, filePath);
-                            sourceTypeOn = INI_FILE_STR;
+                            parseSectionsFromIniPattern(iniPathOn, filesListOn, maxItemsLimit);
+                            iniPathOn.clear();
                         } else if (currentSection == OFF_STR) {
+                            sourceTypeOff = INI_FILE_STR;
                             iniPathOff = cmd[1];
                             preprocessPath(iniPathOff, filePath);
-                            sourceTypeOff = INI_FILE_STR;
+                            parseSectionsFromIniPattern(iniPathOff, filesListOff, maxItemsLimit);
+                            iniPathOff.clear();
                         }
-                        afterSource = true;
                     } else if (commandName == "json_source") {
                         sourceType = JSON_STR;
                         if (currentSection == GLOBAL_STR) {
@@ -3405,7 +3476,6 @@ public:
                                 removeQuotes(jsonKeyOff);
                             }
                         }
-                        afterSource = true;
                     }
                 }
 
@@ -3444,7 +3514,7 @@ public:
         
     
         if (commandMode == DEFAULT_STR || commandMode == OPTION_STR) {
-            if (sourceType == FILE_STR) {
+            if (sourceType == FILE_STR || sourceType == INI_FILE_STR) {
                 selectedItemsList = std::move(filesList);
                 filesList.shrink_to_fit();
             }
@@ -3452,10 +3522,6 @@ public:
                 selectedItemsList = (sourceType == LIST_STR) ? stringToList(listString) : readListFromFile(listPath, maxItemsLimit);
                 listString = "";
                 listPath = "";
-            }
-            else if (sourceType == INI_FILE_STR) {
-                selectedItemsList = parseSectionsFromIni(iniPath);
-                iniPath.clear();
             }
             else if (sourceType == JSON_STR || sourceType == JSON_FILE_STR) {
                 populateSelectedItemsListFromJson(sourceType, (sourceType == JSON_STR) ? jsonString : jsonPath, jsonKey, selectedItemsList);
@@ -3465,7 +3531,7 @@ public:
             applyItemsLimit(selectedItemsList);
 
         } else if (commandMode == TOGGLE_STR) {
-            if (sourceTypeOn == FILE_STR) {
+            if (sourceTypeOn == FILE_STR || sourceTypeOn == INI_FILE_STR) {
                 selectedItemsListOn = std::move(filesListOn);
                 filesListOn.shrink_to_fit();
             }
@@ -3474,10 +3540,6 @@ public:
                 listStringOn = "";
                 listPathOn = "";
             }
-            else if (sourceTypeOn == INI_FILE_STR) {
-                selectedItemsListOn = parseSectionsFromIni(iniPathOn);
-                iniPathOn = "";
-            }
             else if (sourceTypeOn == JSON_STR || sourceTypeOn == JSON_FILE_STR) {
                 populateSelectedItemsListFromJson(sourceTypeOn, (sourceTypeOn == JSON_STR) ? jsonStringOn : jsonPathOn, jsonKeyOn, selectedItemsListOn);
                 jsonPathOff = "";
@@ -3485,7 +3547,7 @@ public:
             }
             applyItemsLimit(selectedItemsListOn);
 
-            if (sourceTypeOff == FILE_STR) {
+            if (sourceTypeOff == FILE_STR || sourceTypeOff == INI_FILE_STR) {
                 selectedItemsListOff = std::move(filesListOff);
                 filesListOff.shrink_to_fit();
             }
@@ -3493,10 +3555,6 @@ public:
                 selectedItemsListOff = (sourceTypeOff == LIST_STR) ? stringToList(listStringOff) : readListFromFile(listPathOff, maxItemsLimit);
                 listStringOff = "";
                 listPathOff = "";
-            }
-            else if (sourceTypeOff == INI_FILE_STR) {
-                selectedItemsListOff = parseSectionsFromIni(iniPathOff);
-                iniPathOff = "";
             }
             else if (sourceTypeOff == JSON_STR || sourceTypeOff == JSON_FILE_STR) {
                 populateSelectedItemsListFromJson(sourceTypeOff, (sourceTypeOff == JSON_STR) ? jsonStringOff : jsonPathOff, jsonKeyOff, selectedItemsListOff);
@@ -4047,6 +4105,39 @@ public:
                 allowSlide.exchange(false, std::memory_order_acq_rel);
                 unlockedSlide.exchange(false, std::memory_order_acq_rel);
                 inSelectionMenu = false;
+
+                // If refresh-return was requested and we have a return context,
+                // swap to a fresh PackageMenu (redraw) and jump to the originating item.
+                // Only acts here, in SelectionOverlay — the flag is ignored everywhere else.
+                if (refreshReturnAfter.exchange(false, std::memory_order_acq_rel) && !returnContextStack.empty()) {
+                    const ReturnContext returnTo = returnContextStack.top();
+                    returnContextStack.pop();
+
+                    jumpItemName  = returnTo.option;
+                    jumpItemValue = "";
+                    jumpItemExactMatch.store(true, std::memory_order_release);
+                    skipJumpReset.store(true, std::memory_order_release);
+
+                    inSubPackageMenu = false;
+                    inPackageMenu    = false;
+                    returningToPackage = true;
+                    lastMenu = "packageMenu";
+
+                    tsl::swapTo<PackageMenu>(
+                        SwapDepth(2),
+                        returnTo.packagePath,
+                        returnTo.sectionName,
+                        returnTo.currentPage,
+                        returnTo.packageName,
+                        returnTo.nestedLayer,
+                        returnTo.pageHeader
+                    );
+                    return true;
+                }
+
+                // Normal back: discard the return context pushed at entry and goBack.
+                if (!returnContextStack.empty())
+                    returnContextStack.pop();
                 
                 // Determine return destination
                 if (filePath == PACKAGE_PATH) {
@@ -4178,25 +4269,6 @@ std::vector<std::vector<std::string>> gatherPromptCommands(
 
 
 // For returning with menu redrawing
-struct ReturnContext {
-    std::string packagePath;
-    std::string sectionName;
-    std::string currentPage;
-    std::string packageName;
-    std::string pageHeader;
-    std::string option;
-    size_t nestedLayer = 0;
-
-    void clear() {
-        packagePath.clear();
-        sectionName.clear();
-        currentPage.clear();
-        packageName.clear();
-        pageHeader.clear();
-        option.clear();
-        nestedLayer = 0;
-    }
-};
 
 
 struct CommandSettings {
@@ -4265,8 +4337,6 @@ static CommandSettings parseCommandSettings(std::vector<std::vector<std::string>
 }
 
 
-static std::stack<ReturnContext> returnContextStack;
-
 // Shared handler for the bare `exit` command.  Drains returnContextStack to
 // find the originating package, resets all navigation state, and swaps
 // directly to MainMenu on the packages tab with the cursor on that package.
@@ -4323,8 +4393,6 @@ static bool handleTriggerReturnToPackages(const std::string& packagePath) {
     return true;
 }
 
-
-class PackageMenu; // forwarding
 
 // returns if there are or are not cickable items.
 bool drawCommandsMenu(
@@ -4495,6 +4563,9 @@ bool drawCommandsMenu(
         
         
         bool isSlot = false;
+        bool skipVisibility = false;
+        bool toggleStateConditionSet = false;
+        bool toggleStateConditionResult = false;
 
         if (drawLocation.empty() || (currentPage == drawLocation) || (optionName.front() == '@')) {
             
@@ -4785,8 +4856,8 @@ bool drawCommandsMenu(
                                         commandSystem = commandSystems[0];
                                     continue;
                                 }
-                                if (commandName.compare(0, STATE_PATTERN_LEN, STATE_PATTERN) == 0) {
-                                    commandState = commandName.substr(STATE_PATTERN_LEN);
+                                if (commandName.compare(0, DEVICE_STATE_PATTERN_LEN, DEVICE_STATE_PATTERN) == 0) {
+                                    commandState = commandName.substr(DEVICE_STATE_PATTERN_LEN);
                                     continue;
                                 }
 
@@ -4880,6 +4951,14 @@ bool drawCommandsMenu(
                                 
                             case 't':
                                 if (parseBoolFlag(commandName, TOP_PIVOT_PATTERN, usingTopPivot)) continue;
+                                if (commandName.compare(0, TOGGLE_STATE_CONDITION_PATTERN_LEN, TOGGLE_STATE_CONDITION_PATTERN) == 0) {
+                                    std::string conditionStr = commandName.substr(TOGGLE_STATE_CONDITION_PATTERN_LEN);
+                                    for (size_t j = 1; j < cmd.size(); ++j)
+                                        conditionStr += " " + cmd[j];
+                                    toggleStateConditionResult = evaluateMenuCondition(conditionStr, packagePath);
+                                    toggleStateConditionSet = true;
+                                    continue;
+                                }
                                 break;
                                 
                             case 'b':
@@ -4948,6 +5027,17 @@ bool drawCommandsMenu(
                                     continue;
                                 }
                                 if (parseBoolFlag(commandName, UNLOCKED_PATTERN, unlockedTrackbar)) continue;
+                                break;
+                                
+                            case 'v':
+                                if (commandName.compare(0, VISIBILITY_CONDITION_PATTERN_LEN, VISIBILITY_CONDITION_PATTERN) == 0) {
+                                    std::string conditionStr = commandName.substr(VISIBILITY_CONDITION_PATTERN_LEN);
+                                    for (size_t j = 1; j < cmd.size(); ++j)
+                                        conditionStr += " " + cmd[j];
+                                    if (!skipVisibility && !evaluateMenuCondition(conditionStr, packagePath))
+                                        skipVisibility = true;
+                                    continue;
+                                }
                                 break;
                         }
                         
@@ -5095,7 +5185,7 @@ bool drawCommandsMenu(
                 skipSystem = true;
             }
             
-            if (!skipSection && !skipSystem) { // for skipping the drawing of sections
+            if (!skipSection && !skipSystem && !skipVisibility) { // for skipping the drawing of sections
                 if (commandMode == TABLE_STR) {
                     if (useHeaderIndent) {
                         tableColumnOffset = 164;
@@ -5261,8 +5351,8 @@ bool drawCommandsMenu(
                             else if (cmd[0] == "ini_file_source") {
                                 std::string iniPath = cmd[1];
                                 preprocessPath(iniPath, packagePath);
-                                entryList = parseSectionsFromIni(iniPath);
-                                break;
+                                parseSectionsFromIniPattern(iniPath, entryList);
+                                // don't break -- continue to accumulate from further ini_file_source lines
                             }
                         }
                     
@@ -5417,7 +5507,8 @@ bool drawCommandsMenu(
                         listItem->disableClickAnimation();
                     } else {
                         listItem->setClickListener([commands, keyName = originalOptionName, cleanOptionName, dropdownSection, packagePath, packageName,
-                            footer, lastSection, listItem, lastPackageHeader, commandMode, showWidget, i](uint64_t keys) {
+                            footer, lastSection, listItem, lastPackageHeader, commandMode, showWidget, i,
+                            currentPage, nestedLayer, pageHeader](uint64_t keys) {
                             
                             if (runningInterpreter.load(acquire))
                                 return false;
@@ -5470,6 +5561,17 @@ bool drawCommandsMenu(
                                     }
 
                                     //tsl::shiftItemFocus(listItem);
+
+                                    returnContextStack.push({
+                                        .packagePath = packagePath,
+                                        .sectionName = dropdownSection,
+                                        .currentPage = currentPage,
+                                        .packageName = packageName,
+                                        .pageHeader  = pageHeader,
+                                        .option      = cleanOptionName,
+                                        .nestedLayer = nestedLayer
+                                    });
+                                    refreshReturnAfter.store(false, std::memory_order_release);
 
                                     tsl::changeTo<SelectionOverlay>(packagePath, keyName, newKey, lastPackageHeader, commands, showWidget);
                                 }
@@ -5593,7 +5695,10 @@ bool drawCommandsMenu(
                         toggleListItem->m_shortHoldKey = SCRIPT_KEY;
 
                         // Set the initial state of the toggle item
-                        if (!pathPatternOn.empty()){
+                        if (toggleStateConditionSet) {
+                            toggleStateOn = toggleStateConditionResult;
+                        }
+                        else if (!pathPatternOn.empty()){
                             toggleStateOn = isFileOrDirectory(pathPatternOn);
                         }
                         else {
@@ -5609,15 +5714,46 @@ bool drawCommandsMenu(
                         
 
                         toggleListItem->setState(toggleStateOn);
+
+                        if (isHold) {
+                            toggleListItem->disableClickAnimation();
+                            toggleListItem->enableTouchHolding();
+                        }
                         
-                        toggleListItem->setStateChangedListener([i, usingProgress, toggleListItem, commandsOn, commandsOff, keyName = originalOptionName, packagePath,
+                        toggleListItem->setStateChangedListener([i, usingProgress, isHold, toggleListItem, commandsOn, commandsOff, keyName = originalOptionName, packagePath,
                             pathPatternOn, pathPatternOff](bool state) {
                             if (runningInterpreter.load(std::memory_order_acquire)) {
                                 return;
                             }
                             
-                            
                             tsl::Overlay::get()->getCurrentGui()->requestFocus(toggleListItem, tsl::FocusDirection::None);
+
+                            if (isHold) {
+                                // Hold-to-toggle: defer execution until hold completes.
+                                // onClick already flipped m_state to `state` (the new state).
+                                // Revert m_state back to old (!state) while runningInterpreter is still false,
+                                // then immediately overwrite the display with INPROGRESS_SYMBOL.
+                                toggleListItem->setState(!state);
+                                toggleListItem->setValue(INPROGRESS_SYMBOL);
+
+                                // Store old ON/OFF for cancel restoration, with correct highlight.
+                                lastSelectedListItemFooter = !state ? CAPITAL_ON_STR : CAPITAL_OFF_STR;
+                                lastFooterHighlight = !state;      // ON=true → highlight false; OFF=false → highlight true
+                                lastFooterHighlightDefined = true;
+
+                                lastSelectedListItem = toggleListItem;
+                                holdStartTick = armGetSystemTick();
+                                storedCommands = state ? getSourceReplacement(commandsOn, pathPatternOn, i, packagePath)
+                                                       : getSourceReplacement(commandsOff, pathPatternOff, i, packagePath);
+                                lastCommandMode = TOGGLE_STR;
+                                lastCommandIsHold = true;
+                                lastKeyName = keyName;
+                                // Pre-set nextToggleState so handleInterpreterCompletion commits correctly on success.
+                                nextToggleState = state ? CAPITAL_ON_STR : CAPITAL_OFF_STR;
+
+                                runningInterpreter.store(true, release);
+                                return;
+                            }
                             
                             if (usingProgress)
                                 toggleListItem->setValue(INPROGRESS_SYMBOL);
@@ -5873,6 +6009,9 @@ public:
         if (ult::refreshWallpaperNow.exchange(false, std::memory_order_acq_rel))
             handleWallpaperReload();
     
+        if (ult::refreshCombos.exchange(false, std::memory_order_acq_rel))
+            tsl::hlp::loadEntryKeyCombos();
+
         if (handleGoBackAfter()) return true;
     
         if (!returningToPackage && !isTouching) {
@@ -5961,7 +6100,8 @@ public:
                         //    triggerNavigationFeedback();
                         //}
                         // Ensure pkgPageCursors has an entry for this nesting level
-                        if (usePageRecall) {
+                        //if (usePageRecall) {
+                        {
                             while (pkgPageCursors.size() <= static_cast<size_t>(nestedLayer))
                                 pkgPageCursors.emplace_back("", "");
                             // Save cursor for the page we're leaving; restore cursor for the page we're entering
@@ -6003,7 +6143,8 @@ public:
 
             if (nestedMenuCount == 0) {
                 inPackageMenu = false;
-                if (usePageRecall) pkgPageCursors.clear(); // returning to main menu: discard all package page cursors
+                //if (usePageRecall) pkgPageCursors.clear();
+                pkgPageCursors.clear(); // returning to main menu: discard all package page cursors
                 if (!inHiddenMode.load(std::memory_order_acquire))
                     returningToMain = true;
                 else
@@ -6023,7 +6164,8 @@ public:
             if (nestedMenuCount > 0) {
                 nestedMenuCount--;
                 // Discard page cursors for the level we just left
-                if (usePageRecall && (pkgPageCursors.size() > static_cast<size_t>(nestedMenuCount + 1)))
+                //if (usePageRecall && (pkgPageCursors.size() > static_cast<size_t>(nestedMenuCount + 1)))
+                if (pkgPageCursors.size() > static_cast<size_t>(nestedMenuCount + 1))
                     pkgPageCursors.resize(nestedMenuCount + 1);
                 if (lastPackageMenu == "subPackageMenu") {
                     returningToSubPackage = true;
@@ -6061,7 +6203,8 @@ public:
                 if (nestedMenuCount > 0)
                     nestedMenuCount--;
                 // Discard page cursors for the level we just left
-                if (usePageRecall && pkgPageCursors.size() > static_cast<size_t>(nestedMenuCount + 1))
+                //if (usePageRecall && pkgPageCursors.size() > static_cast<size_t>(nestedMenuCount + 1))
+                if (pkgPageCursors.size() > static_cast<size_t>(nestedMenuCount + 1))
                     pkgPageCursors.resize(nestedMenuCount + 1);
                 
                 jumpItemName = returnTo.option;
@@ -6689,7 +6832,7 @@ public:
 
             FILE* packageFileOut = fopen((PACKAGE_PATH + PACKAGE_FILENAME).c_str(), "w");
             if (packageFileOut) {
-                constexpr const char packageContent[] = "[*Reboot To]\n[*Boot Entry]\nini_file_source /bootloader/hekate_ipl.ini\nfilter config\nreboot boot '{ini_file_source(*)}'\n[hekate - \uE073]\nreboot HEKATE\n[hekate UMS - \uE073\uE08D]\nreboot UMS\n\n[Commands]\n[Shutdown - ]\n;hold=true\nshutdown\n";
+                constexpr const char packageContent[] = "[*Reboot To]\n[*Boot Entry]\nini_file_source /bootloader/hekate_ipl.ini\nfilter config\nreboot boot '{ini_file_source(*)}'\n[*INI Entry]\nini_file_source /bootloader/ini/*.ini\nfilter config\nreboot ini '{ini_file_source(*)}'\n[hekate - \uE073]\nreboot HEKATE\n[hekate UMS - \uE073\uE08D]\nreboot UMS\n\n[Commands]\n[Shutdown - ]\n;hold=true\nshutdown\n";
                 fwrite(packageContent, sizeof(packageContent) - 1, 1, packageFileOut);
                 fclose(packageFileOut);
             }
@@ -7060,6 +7203,9 @@ public:
         if (ult::refreshWallpaperNow.exchange(false, std::memory_order_acq_rel))
             handleWallpaperReload();
 
+        if (ult::refreshCombos.exchange(false, std::memory_order_acq_rel))
+            tsl::hlp::loadEntryKeyCombos();
+
         if (handleGoBackAfter()) return true;
     
         if (refreshPage.load(acquire) && !isTouching) {
@@ -7180,7 +7326,8 @@ public:
                                                      : (usePageSwap ? PACKAGES_STR : OVERLAYS_STR);
                             
                             // Save cursor for the page we're leaving; restore cursor for the page we're entering
-                            if (usePageRecall) {
+                            //if (usePageRecall) {
+                            {
                                 if (onLeftPage) {
                                     mainMenuLeftItem  = s_lastFocusedItemText;
                                     jumpItemName      = mainMenuRightItem;
@@ -7365,11 +7512,13 @@ void initializeSettingsAndDirectories() {
     ensureDefault("haptic_feedback",          FALSE_STR);
     ensureDefault("auto_ntp_sync",            TRUE_STR);
     ensureDefault("swipe_to_open",            TRUE_STR);
+    ensureDefault("stick_navigation",          TRUE_STR);
     ensureDefault("opaque_screenshots",       TRUE_STR);
     ensureDefault("silence_notifications",    FALSE_STR);
     ensureDefault("notifications",            TRUE_STR);
     ensureDefault("notifications_hotkey",     TRUE_STR);
     ensureDefault("max_notifications",        "3");
+    ensureDefault("hold_duration",            "3000");
     ensureDefault("hide_clock",               FALSE_STR);
     ensureDefault("hide_battery",             TRUE_STR);
     ensureDefault("hide_pcb_temp",            TRUE_STR);
@@ -7402,8 +7551,8 @@ void initializeSettingsAndDirectories() {
     setDefaultValue("package_titles",         FALSE_STR, usePackageTitles);
     setDefaultValue("package_versions",       TRUE_STR,  usePackageVersions);
     setDefaultValue("page_swap",              FALSE_STR, usePageSwap);        // also set by parseOverlaySettings
-    setDefaultValue("page_recall",            TRUE_STR,  usePageRecall);
-    setDefaultValue("launch_recall",          TRUE_STR,  useLaunchRecall);
+    //setDefaultValue("page_recall",            TRUE_STR,  usePageRecall);
+    //setDefaultValue("launch_recall",          TRUE_STR,  useLaunchRecall);
     setDefaultValue("right_alignment",        FALSE_STR, useRightAlignment);  // also set by parseOverlaySettings
     setDefaultValue("startup_notification",   TRUE_STR,  useStartupNotification);
 
@@ -7414,6 +7563,10 @@ void initializeSettingsAndDirectories() {
         trim(sec["to_packages"]);
         toPackages = (sec["to_packages"] == TRUE_STR);
     }
+
+    // Load numeric Ultrahand-only settings that aren't handled by parseOverlaySettings
+    ult::useStickNavigation = (sec.at("stick_navigation") != ult::FALSE_STR);
+    holdDurationMs = static_cast<u64>(std::max(500, std::min(ult::stoi(sec.at("hold_duration")), 5000)));
 
     if (needsUpdate)
         saveIniFileData(ULTRAHAND_CONFIG_INI_PATH, iniData);
@@ -7471,21 +7624,22 @@ public:
         // All side-effect work was intentionally deferred from main() to here so it
         // only runs when the feature is actually enabled.  initializeSettingsAndDirectories()
         // has already run, so we drive toPackages directly instead of going through the INI.
-        if (isComboReturnFrom && !ult::useLaunchRecall) {
-            comboReturnOverlayFilename.clear();
-            comboReturnOverlayMode.clear();
-            setUltrahandConfig(IN_HIDDEN_OVERLAY_STR, FALSE_STR);
-        }
+        //if (isComboReturnFrom && !ult::useLaunchRecall) {
+        //    comboReturnOverlayFilename.clear();
+        //    comboReturnOverlayMode.clear();
+        //    setUltrahandConfig(IN_HIDDEN_OVERLAY_STR, FALSE_STR);
+        //}
         if (isComboReturnPackage) {
-            if (ult::useLaunchRecall) {
+            //if (ult::useLaunchRecall) {
+            {
                 // Apply the tab-switch and hidden-mode effects that main() used to write
                 // into the INI.  toPackages is set directly since initializeSettingsAndDirectories()
                 // already ran.  The hidden-package INI flag is still written so createUI() sees it.
                 toPackages = true;
                 if (parseValueFromIniSection(PACKAGES_INI_FILEPATH, comboReturnPackageName, HIDE_STR) == TRUE_STR)
                     setUltrahandConfig(IN_HIDDEN_PACKAGE_STR, TRUE_STR);
-            } else {
-                comboReturnPackageName.clear();
+            //} else {
+            //    comboReturnPackageName.clear();
             }
         }
 

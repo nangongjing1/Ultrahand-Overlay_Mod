@@ -39,6 +39,8 @@ static std::atomic<bool> triggerExit(false);
 std::atomic<bool> exitingUltrahand{false};
 std::atomic<bool> isDownloadCommand{false};
 std::atomic<bool> commandSuccess{false};
+inline void setCommandFailed();
+inline void setCommandResult(bool result);
 std::atomic<bool> refreshPage{false};
 std::atomic<bool> refreshPackage{false};
 std::atomic<bool> skipJumpReset{false};
@@ -46,6 +48,7 @@ std::atomic<bool> interpreterLogging{false};
 
 
 std::atomic<bool> goBackAfter{false};
+std::atomic<bool> refreshReturnAfter{false};
 std::atomic<bool> triggerReturnToPackages{false};
 
 std::atomic<bool> usingErista{util::IsErista()};
@@ -850,7 +853,7 @@ void powerOffAllControllers() {
     // Initialize Bluetooth manager
     rc = btmInitialize();
     if (R_FAILED(rc)) {
-        commandSuccess.store(false, std::memory_order_release);
+        setCommandFailed();
         return;
     }
     
@@ -861,18 +864,18 @@ void powerOffAllControllers() {
             g_addresses[i] = connected_devices[i].address;
         }
     } else {
-        commandSuccess.store(false, std::memory_order_release);
+        setCommandFailed();
     }
     
     if (R_SUCCEEDED(rc)) {
         for (int i = 0; i != g_connected_count; ++i) {
             rc = btmHidDisconnect(g_addresses[i]);
             if (R_FAILED(rc)) {
-                commandSuccess.store(false, std::memory_order_release);
+                setCommandFailed();
             }
         }
     } else {
-        commandSuccess.store(false, std::memory_order_release);
+        setCommandFailed();
     }
     
     // Exit Bluetooth manager
@@ -1072,7 +1075,7 @@ void addSelectionIsEmptyDrawer(auto& list) {
     list->addItem(warning);
 }
 
-bool applyPlaceholderReplacements(std::vector<std::string>& cmd, const std::string& hexPath, const std::string& iniPath, const std::string& listString, const std::string& listPath, const std::string& jsonString, const std::string& jsonPath);
+bool applyPlaceholderReplacements(std::vector<std::string>& cmd, const std::string& hexPath, const std::string& iniPath, const std::string& listString, const std::string& listPath, const std::string& jsonString, const std::string& jsonPath, const std::string& packagePath = "");
 
 std::string getFirstSectionText(const std::vector<std::vector<std::string>>& tableData, const std::string& packagePath) {
     std::string message;
@@ -1108,7 +1111,7 @@ std::string getFirstSectionText(const std::vector<std::vector<std::string>>& tab
             (!inEristaSection && !inMarikoSection)) {
 
             // Apply placeholder replacements if necessary
-            applyPlaceholderReplacements(cmd, hexPath, iniPath, listString, listPath, jsonString, jsonPath);
+            applyPlaceholderReplacements(cmd, hexPath, iniPath, listString, listPath, jsonString, jsonPath, packagePath);
 
             const size_t cmdSize = cmd.size();
 
@@ -1313,7 +1316,7 @@ static bool buildTableDrawerLines(
                 if (applyPlaceholderReplacements(
                     cmd, hexPath, iniPath,
                     listString, listPath,
-                    jsonString, jsonPath
+                    jsonString, jsonPath, packagePath
                 )) {
                     anyReplacementsMade = true;
                 }
@@ -2122,7 +2125,7 @@ void applyReplaceIniPlaceholder(std::string& arg, const std::string& commandName
                     
                     // Load section names only once when needed
                     if (!sectionsLoaded) {
-                        sectionNames = parseSectionsFromIni(iniPath);
+                        sectionNames = parseSectionsFromIniPattern(iniPath);
                         sectionsLoaded = true;
                     }
                     
@@ -2302,7 +2305,8 @@ std::vector<std::vector<std::string>> getSourceReplacement(const std::vector<std
     bool inMarikoSection = false;
 
     std::vector<std::vector<std::string>> modifiedCommands;
-    std::string listString, listPath, jsonString, jsonPath, iniPath;
+    std::string listString, listPath, jsonString, jsonPath, iniPath, iniFilePath;
+    std::string hexFilePath;
     bool usingFileSource = false;
 
     std::string fileName = getNameFromPath(entry);
@@ -2320,6 +2324,8 @@ std::vector<std::vector<std::string>> getSourceReplacement(const std::vector<std
     std::string raw;
 
     const std::string indexStr = ult::to_string(entryIndex);
+
+
 
     for (const auto& cmd : commands) {
         if (cmd.empty()) {
@@ -2347,34 +2353,48 @@ std::vector<std::vector<std::string>> getSourceReplacement(const std::vector<std
             (inMarikoSection && usingMariko) ||
             (!inEristaSection && !inMarikoSection))
         {
-            // Apply placeholder replacements if necessary
+            // Update source paths/values from this command before processing args.
+            // Done unconditionally (no .empty() guard) so sources can be redefined mid-section.
+            // Each source arg is fully resolved using whatever ini_file/hex_file/etc. are current
+            // at this point in the section, so placeholders can be composed inside any source.
+            if (commandName == "file_source") {
+                usingFileSource = true;
+            } else if (cmd.size() >= 2) {
+                auto resolveArg = [&](std::string val) -> std::string {
+                    std::vector<std::string> tmp = { std::move(val) };
+                    applyPlaceholderReplacements(tmp, hexFilePath, iniFilePath, listString, listPath, jsonString, jsonPath, packagePath);
+                    return std::move(tmp[0]);
+                };
+                if (commandName == "ini_file") {
+                    iniFilePath = resolveArg(cmd[1]);
+                    preprocessPath(iniFilePath, packagePath);
+                } else if (commandName == "hex_file") {
+                    hexFilePath = resolveArg(cmd[1]);
+                    preprocessPath(hexFilePath, packagePath);
+                } else if (commandName == "list_file_source") {
+                    listPath = resolveArg(cmd[1]);
+                    preprocessPath(listPath, packagePath);
+                } else if (commandName == "ini_file_source") {
+                    iniPath = resolveArg(cmd[1]);
+                    preprocessPath(iniPath, packagePath);
+                } else if (commandName == "json_file_source") {
+                    jsonPath = resolveArg(cmd[1]);
+                    preprocessPath(jsonPath, packagePath);
+                }
+            }
+
+            // Apply placeholder replacements to each arg.
+            // NOTE: {ini_file(...)} and {hex_file(...)} are intentionally NOT resolved here for
+            // regular command args. interpretAndExecuteCommands resolves them sequentially via
+            // applyPlaceholderReplacements, so set-ini-val writes are visible to subsequent
+            // {ini_file(...)} reads in the same section. Resolving them here upfront would bake
+            // in stale values read before any commands in the section have executed.
+            // json/list dict values are captured from modifiedCmd[1] after this loop,
+            // so their placeholders are resolved here too — no special-casing needed.
             for (const auto& arg : cmd) {
                 modifiedArg = arg;
 
-                if (commandName == "file_source") {
-                    usingFileSource = true;
-                }
-                else if (commandName == "list_source" && listString.empty()) {
-                    listString = cmd[1];
-                    removeQuotes(listString);
-                }
-                else if (commandName == "list_file_source" && listPath.empty()) {
-                    listPath = cmd[1];
-                    preprocessPath(listPath, packagePath);
-                }
-                else if (commandName == "ini_file_source" && iniPath.empty()) {
-                    iniPath = cmd[1];
-                    preprocessPath(iniPath, packagePath);
-                }
-                else if (commandName == "json_source" && jsonString.empty()) {
-                    jsonString = cmd[1];
-                }
-                else if (commandName == "json_file_source" && jsonPath.empty()) {
-                    jsonPath = cmd[1];
-                    preprocessPath(jsonPath, packagePath);
-                }
-
-                // These three always apply
+                // Resolve local source-entry placeholders first (not in any global map).
                 replaceAllPlaceholders(modifiedArg, "{file_source}", entry);
                 replaceAllPlaceholders(modifiedArg, "{file_name}", fileName);
                 path = getParentDirNameFromPath(entry);
@@ -2382,11 +2402,19 @@ std::vector<std::vector<std::string>> getSourceReplacement(const std::vector<std
                 replaceAllPlaceholders(modifiedArg, "{folder_name}", path);
                 replaceAllPlaceholders(modifiedArg, "{index}", indexStr);
 
-                // {list_source(...)} block
+                // Resolve all other placeholders ({if_*}, {math}, {crc32}, general, etc.).
+                // Wraps modifiedArg in a single-element vector to reuse the full pipeline.
+                {
+                    std::vector<std::string> tmp = { modifiedArg };
+                    applyPlaceholderReplacements(tmp, hexFilePath, iniFilePath, listString, listPath, jsonString, jsonPath, packagePath);
+                    modifiedArg = std::move(tmp[0]);
+                }
+
+                // {list_source(...)} block — uses *_source path (index into current selection list)
                 if (modifiedArg.find("{list_source(") != std::string::npos) {
                     applyPlaceholderReplacement(modifiedArg, "*", indexStr);
                     startPos = modifiedArg.find("{list_source(");
-                    endPos   = modifiedArg.find(")}", startPos + 13);  // Find )}  after the opening
+                    endPos   = modifiedArg.find(")}", startPos + 13);
                     if (endPos != std::string::npos && endPos > startPos) {
                         const auto& listItems = stringToList(listString);
                         raw = (entryIndex < listItems.size()) ? listItems[entryIndex] : "";
@@ -2399,8 +2427,7 @@ std::vector<std::vector<std::string>> getSourceReplacement(const std::vector<std
                 if (modifiedArg.find("{list_file_source(") != std::string::npos) {
                     applyPlaceholderReplacement(modifiedArg, "*", indexStr);
                     startPos = modifiedArg.find("{list_file_source(");
-                    // Find the closing )}  AFTER the opening we just found
-                    endPos = modifiedArg.find(")}", startPos + 18);  // 18 = length of "{list_file_source("
+                    endPos = modifiedArg.find(")}", startPos + 18);
                     if (endPos != std::string::npos && endPos > startPos) {
                         raw = getEntryFromListFile(listPath, entryIndex);
                         replacement = returnOrNull(raw);
@@ -2408,19 +2435,17 @@ std::vector<std::vector<std::string>> getSourceReplacement(const std::vector<std
                     }
                 }
 
-                // {ini_file_source(...)} block - FIXED
+                // {ini_file_source(...)} block
                 if (modifiedArg.find("{ini_file_source(") != std::string::npos) {
                     applyPlaceholderReplacement(modifiedArg, "*", indexStr);
-                    // applyReplaceIniPlaceholder modifies modifiedArg in place, so we just call it
                     applyReplaceIniPlaceholder(modifiedArg, "ini_file_source", iniPath);
-                    // No additional replacement needed!
                 }
 
                 // {json_source(...)} block
                 if (modifiedArg.find("{json_source(") != std::string::npos) {
                     applyPlaceholderReplacement(modifiedArg, "*", indexStr);
                     startPos = modifiedArg.find("{json_source(");
-                    endPos   = modifiedArg.find(")}", startPos + 13);  // Find )}  after the opening
+                    endPos   = modifiedArg.find(")}", startPos + 13);
                     if (endPos != std::string::npos && endPos > startPos) {
                         raw = replaceJsonPlaceholder(
                             modifiedArg.substr(startPos, endPos - startPos + 2),
@@ -2432,12 +2457,11 @@ std::vector<std::vector<std::string>> getSourceReplacement(const std::vector<std
                     }
                 }
 
-
                 // {json_file_source(...)} block
                 if (modifiedArg.find("{json_file_source(") != std::string::npos) {
                     applyPlaceholderReplacement(modifiedArg, "*", indexStr);
                     startPos = modifiedArg.find("{json_file_source(");
-                    endPos   = modifiedArg.find(")}", startPos + 18);  // Find )}  after the opening
+                    endPos   = modifiedArg.find(")}", startPos + 18);
                     if (endPos != std::string::npos && endPos > startPos) {
                         raw = replaceJsonPlaceholder(
                             modifiedArg.substr(startPos, endPos - startPos + 2),
@@ -2452,6 +2476,24 @@ std::vector<std::vector<std::string>> getSourceReplacement(const std::vector<std
                 modifiedCmd.push_back(std::move(modifiedArg));
             }
 
+            // After the arg loop has resolved source placeholders, capture json/list values
+            // and apply full placeholder resolution (all types, including {ini_file(...)},
+            // {hex_file(...)}, {if_*}, {crc32}, {math}, etc.) so any placeholder is valid
+            // inside a json/list dictionary value without special-casing.
+            if ((commandName == "json" || commandName == "json_source") && modifiedCmd.size() >= 2) {
+                jsonString = modifiedCmd[1];
+                removeQuotes(jsonString);
+                std::vector<std::string> tmp = { jsonString };
+                applyPlaceholderReplacements(tmp, hexFilePath, iniFilePath, listString, listPath, jsonString, jsonPath, packagePath);
+                jsonString = std::move(tmp[0]);
+            }
+            if ((commandName == "list" || commandName == "list_source") && modifiedCmd.size() >= 2) {
+                listString = modifiedCmd[1];
+                removeQuotes(listString);
+                std::vector<std::string> tmp = { listString };
+                applyPlaceholderReplacements(tmp, hexFilePath, iniFilePath, listString, listPath, jsonString, jsonPath, packagePath);
+                listString = std::move(tmp[0]);
+            }
             modifiedCommands.emplace_back(std::move(modifiedCmd));
         }
     }
@@ -2956,6 +2998,40 @@ void updateGeneralPlaceholders() {
 // Returns true and sets `out` on success; returns false and sets `out` to
 // NULL_STR when either paren is absent.  Used by the lambdas below to
 // eliminate the repeated find/bounds-check/substr boilerplate.
+// CRC32 (ISO 3309 / ITU-T V.42) — table-driven Sarwate, no extra libs needed.
+// The 256-entry table is evaluated at compile time; the loop is branchless.
+static std::string crc32File(const std::string& path) {
+    struct Table {
+        uint32_t v[256];
+        constexpr Table() : v{} {
+            for (uint32_t i = 0; i < 256; ++i) {
+                uint32_t c = i;
+                for (int k = 0; k < 8; ++k)
+                    c = (c >> 1) ^ (0xEDB88320u & -(c & 1u));
+                v[i] = c;
+            }
+        }
+    };
+    static constexpr Table T{};
+
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return NULL_STR;
+
+    uint32_t crc = 0xFFFFFFFFu;
+    uint8_t buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        for (size_t i = 0; i < n; ++i)
+            crc = (crc >> 8) ^ T.v[(crc ^ buf[i]) & 0xFFu];
+    }
+    fclose(f);
+
+    crc ^= 0xFFFFFFFFu;
+    char hex[9];
+    snprintf(hex, sizeof(hex), "%08X", crc);
+    return std::string(hex);
+}
+
 static bool getPlaceholderContent(const std::string& placeholder, std::string& out) {
     const size_t open = placeholder.find('(');
     if (open == std::string::npos) { out = NULL_STR; return false; }
@@ -2968,9 +3044,196 @@ static bool getPlaceholderContent(const std::string& placeholder, std::string& o
 bool applyPlaceholderReplacements(std::vector<std::string>& cmd, const std::string& hexPath, 
                                  const std::string& iniPath, const std::string& listString, 
                                  const std::string& listPath, const std::string& jsonString, 
-                                 const std::string& jsonPath) {
+                                 const std::string& jsonPath, const std::string& packagePath) {
     bool replacementsMade = false;
-    
+
+    // Shared helpers for conditional placeholders.
+    //
+    // parse2: {if_xxx(VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+    //   value      = arg 1  (the subject, typically a resolved placeholder)
+    //   trueFb     = arg 2  (returned when condition is TRUE)
+    //   falseFb    = arg 3  (optional; returned when condition is FALSE; defaults to value)
+    static const auto parse2 = [](const std::string& ph,
+                                   std::string& value, std::string& trueFb,
+                                   std::string& falseFb, bool& hasFalseFb) -> bool {
+        const size_t open  = ph.find('(');
+        const size_t close = ph.rfind(')');
+        if (open == std::string::npos || close == std::string::npos || close <= open + 1)
+            return false;
+        const std::string inner = ph.substr(open + 1, close - open - 1);
+        const size_t firstComma = inner.find(',');
+        if (firstComma == std::string::npos) return false;
+        const size_t lastComma  = inner.rfind(',');
+        value = inner.substr(0, firstComma);
+        removeQuotes(value);
+        if (firstComma == lastComma) {
+            // 2-arg form: no false fallback
+            trueFb = inner.substr(firstComma + 1);
+            removeQuotes(trueFb);
+            hasFalseFb = false;
+        } else {
+            // 3-arg form: false fallback present
+            trueFb  = inner.substr(firstComma + 1, lastComma - firstComma - 1);
+            falseFb = inner.substr(lastComma + 1);
+            removeQuotes(trueFb);
+            removeQuotes(falseFb);
+            hasFalseFb = true;
+        }
+        return true;
+    };
+    // parse3: {if_xxx(VALUE, COMPARE_VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+    //   value      = arg 1  (the subject)
+    //   needle     = arg 2  (what to compare against)
+    //   trueFb     = arg 3  (returned when condition is TRUE)
+    //   falseFb    = arg 4  (optional; returned when condition is FALSE; defaults to value)
+    static const auto parse3 = [](const std::string& ph,
+                                   std::string& value, std::string& needle,
+                                   std::string& trueFb, std::string& falseFb,
+                                   bool& hasFalseFb) -> bool {
+        const size_t open  = ph.find('(');
+        const size_t close = ph.rfind(')');
+        if (open == std::string::npos || close == std::string::npos || close <= open + 1)
+            return false;
+        const std::string inner = ph.substr(open + 1, close - open - 1);
+        const size_t c1 = inner.find(',');         // end of value
+        if (c1 == std::string::npos) return false;
+        const size_t c2 = inner.find(',', c1 + 1); // end of needle
+        if (c2 == std::string::npos) return false;
+        const size_t cl = inner.rfind(',');         // start of false_fb (if any)
+        value  = inner.substr(0, c1);
+        needle = inner.substr(c1 + 1, c2 - c1 - 1);
+        removeQuotes(value);
+        removeQuotes(needle);
+        if (cl == c2) {
+            // 3-arg form: no false fallback
+            trueFb = inner.substr(c2 + 1);
+            removeQuotes(trueFb);
+            hasFalseFb = false;
+        } else {
+            // 4-arg form: false fallback present
+            trueFb  = inner.substr(c2 + 1, cl - c2 - 1);
+            falseFb = inner.substr(cl + 1);
+            removeQuotes(trueFb);
+            removeQuotes(falseFb);
+            hasFalseFb = true;
+        }
+        return true;
+    };
+    // compareVersions: alphanumeric version-aware comparison.
+    //   Separators: '.' and '_' are neutral (extra = pre-release, sorts lower).
+    //               '-' introduces pre-release labels  -> sorts LOWER than bare release.
+    //               '+' introduces build/revision labels -> sorts HIGHER than bare release.
+    //   Segments that are both pure digits are compared numerically (so "10" > "9").
+    //   Non-digit segments are compared lexicographically.
+    //   Returns -1 if a < b, 0 if a == b, +1 if a > b.
+    //   Examples: "2.2.4" > "2.0.1",  "1.10.0" > "1.9.0",
+    //             "2.0.1-rc" < "2.0.1",  "2.0.1+r23" > "2.0.1",
+    //             "2.0.1+r23" > "2.0.1-rc"
+    static const auto compareVersions = [](const std::string& a, const std::string& b) -> int {
+        static const auto isSep = [](char c) {
+            return c == '.' || c == '-' || c == '_' || c == '+';
+        };
+        // sepTier: '+ '= build metadata (sorts higher), '-'= pre-release (sorts lower),
+        //          '.'/'_'/' ' = neutral (extra segments = pre-release = lower)
+        static const auto sepTier = [](char c) -> int {
+            if (c == '+') return  1;
+            if (c == '-') return -1;
+            return -1; // '.', '_', or no separator -> pre-release convention
+        };
+        static const auto isAllDigits = [](const std::string& s, size_t start, size_t end) {
+            for (size_t i = start; i < end; ++i)
+                if (!std::isdigit(static_cast<unsigned char>(s[i]))) return false;
+            return start < end;
+        };
+        size_t ai = 0, bi = 0;
+        const size_t alen = a.size(), blen = b.size();
+        char aSep = 0, bSep = 0; // separator that introduced the current segment
+        while (true) {
+            // Skip to start of next segment, recording which separator we crossed
+            while (ai < alen && isSep(a[ai])) { aSep = a[ai]; ++ai; }
+            while (bi < blen && isSep(b[bi])) { bSep = b[bi]; ++bi; }
+            if (ai >= alen && bi >= blen) break;
+            // One side exhausted: the other has extra segments.
+            // The separator that introduced those extra segments determines sort order.
+            if (ai >= alen) return -sepTier(bSep); // b has extra: tier > 0 means b > a -> -1
+            if (bi >= blen) return  sepTier(aSep); // a has extra: tier > 0 means a > b -> +1
+            // Both have segments. If they crossed different separator tiers, tier wins.
+            if (ai > 0 && bi > 0) { // not the very first segment
+                const int ta = sepTier(aSep), tb = sepTier(bSep);
+                if (ta != tb) return (ta > tb) ? 1 : -1;
+            }
+            // Find end of current segment
+            size_t ae = ai; while (ae < alen && !isSep(a[ae])) ++ae;
+            size_t be = bi; while (be < blen && !isSep(b[be])) ++be;
+            if (isAllDigits(a, ai, ae) && isAllDigits(b, bi, be)) {
+                const long va = std::strtol(a.c_str() + ai, nullptr, 10);
+                const long vb = std::strtol(b.c_str() + bi, nullptr, 10);
+                if (va < vb) return -1;
+                if (va > vb) return  1;
+            } else {
+                const int cmp = a.compare(ai, ae - ai, b, bi, be - bi);
+                if (cmp < 0) return -1;
+                if (cmp > 0) return  1;
+            }
+            ai = ae;
+            bi = be;
+        }
+        return 0;
+    };
+
+    // parseNum: true when the whole token parses as a number (int or float).
+    // Leading/trailing spaces are tolerated; inf/nan and non-numeric tokens are
+    // rejected up front so they fall through to lexicographic comparison.
+    static const auto parseNum = [](const std::string& s, double& out) -> bool {
+        const char* c = s.c_str();
+        while (*c == ' ' || *c == '\t') ++c;
+        const char afterSign = (*c == '+' || *c == '-') ? c[1] : *c;
+        if (!((afterSign >= '0' && afterSign <= '9') || afterSign == '.'))
+            return false;
+        char* end = nullptr;
+        out = std::strtod(c, &end);
+        if (end == c) return false;
+        while (*end == ' ' || *end == '\t') ++end;
+        return *end == '\0';
+    };
+    // compareAlnum: numeric compare when both sides are numbers, else
+    // lexicographic. Returns -1 / 0 / +1.
+    static const auto compareAlnum = [](const std::string& a, const std::string& b) -> int {
+        double na, nb;
+        if (parseNum(a, na) && parseNum(b, nb))
+            return (na < nb) ? -1 : (na > nb ? 1 : 0);
+        const int c = a.compare(b);
+        return (c < 0) ? -1 : (c > 0 ? 1 : 0);
+    };
+
+    // Shared {if_...} resolvers. Each placeholder entry below is a thin forwarder
+    // into one of these, so the parse + fallback boilerplate is emitted once
+    // rather than duplicated per operator.
+    //   ifNull   : parse2; true-branch when (value == null) matches wantNull
+    //   ifEqual  : parse3; true-branch when (value == compare) matches wantEqual
+    //   ifCompare: parse3; true-branch when rel(cmp(value, compare)) holds
+    static const auto ifNull = [](const std::string& ph, bool wantNull) -> std::string {
+        std::string v, tFb, fFb; bool hasFb;
+        if (!parse2(ph, v, tFb, fFb, hasFb)) return NULL_STR;
+        return ((v == NULL_STR) == wantNull) ? tFb : (hasFb ? fFb : v);
+    };
+    static const auto ifEqual = [](const std::string& ph, bool wantEqual) -> std::string {
+        std::string v, needle, tFb, fFb; bool hasFb;
+        if (!parse3(ph, v, needle, tFb, fFb, hasFb)) return NULL_STR;
+        return ((v == needle) == wantEqual) ? tFb : (hasFb ? fFb : v);
+    };
+    static const auto ifCompare = [](const std::string& ph,
+                                     int  (*cmp)(const std::string&, const std::string&),
+                                     bool (*rel)(int)) -> std::string {
+        std::string v, needle, tFb, fFb; bool hasFb;
+        if (!parse3(ph, v, needle, tFb, fFb, hasFb)) return NULL_STR;
+        return rel(cmp(v, needle)) ? tFb : (hasFb ? fFb : v);
+    };
+    static const auto relGt = [](int c) { return c >  0; };
+    static const auto relLt = [](int c) { return c <  0; };
+    static const auto relGe = [](int c) { return c >= 0; };
+    static const auto relLe = [](int c) { return c <= 0; };
+
     std::vector<std::pair<std::string, std::function<std::string(const std::string&)>>> placeholders = {
         {"{hex_file(", [&](const std::string& placeholder) { 
             if (hexPath.empty() || !isFileOrDirectory(hexPath)) return NULL_STR;
@@ -3154,9 +3417,57 @@ bool applyPlaceholderReplacements(std::vector<std::string>& cmd, const std::stri
             removeQuotes(ovlPath);
             trim(ovlPath);
             if (ovlPath.empty()) return NULL_STR;
+            preprocessPath(ovlPath, packagePath);
             const auto& [result, _ovlName, version, _lib, _ams] = getOverlayInfo(ovlPath);
             return result != ResultSuccess ? NULL_STR : returnOrNull(version);
         }},
+        {"{crc32(", [&](const std::string& placeholder) {
+            std::string filePath;
+            if (!getPlaceholderContent(placeholder, filePath)) return NULL_STR;
+            removeQuotes(filePath);
+            trim(filePath);
+            if (filePath.empty()) return NULL_STR;
+            preprocessPath(filePath, packagePath);
+            return crc32File(filePath);
+        }},
+        // Conditional placeholders -- inner args are fully resolved before these fire.
+        // The FALSE_FALLBACK is optional in all forms.  When omitted, the false branch
+        // returns VALUE unchanged.  When present, it is the last comma-delimited arg.
+        //
+        // {if_null(VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+        // {if_!null(VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+        //   "null" is the literal string returned by unresolved/missing placeholders.
+        //
+        // {if_==(VALUE, COMPARE_VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+        // {if_!=(VALUE, COMPARE_VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+        //   Exact string equality after removeQuotes on all args.
+        //
+        // {if_>(VALUE, COMPARE_VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+        // {if_<(VALUE, COMPARE_VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+        // {if_>=(VALUE, COMPARE_VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+        // {if_<=(VALUE, COMPARE_VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+        //   When both values parse as numbers they are compared numerically
+        //   (as floats, so "9" < "10" and "1.5" > "1.05"); otherwise they are
+        //   compared lexicographically, byte by byte and case-sensitive.
+        //
+        // {if_version_>(VALUE, COMPARE_VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+        // {if_version_<(VALUE, COMPARE_VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+        // {if_version_>=(VALUE, COMPARE_VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+        // {if_version_<=(VALUE, COMPARE_VALUE, TRUE_FALLBACK [, FALSE_FALLBACK])}
+        //   Version-aware comparison: numeric segments compared as integers,
+        //   '-' suffix = pre-release (lower), '+' suffix = build metadata (higher).
+        {"{if_null(",       [](const std::string& ph) { return ifNull(ph, true);  }},
+        {"{if_!null(",      [](const std::string& ph) { return ifNull(ph, false); }},
+        {"{if_==(",         [](const std::string& ph) { return ifEqual(ph, true);  }},
+        {"{if_!=(",         [](const std::string& ph) { return ifEqual(ph, false); }},
+        {"{if_>(",          [](const std::string& ph) { return ifCompare(ph, compareAlnum,    relGt); }},
+        {"{if_<(",          [](const std::string& ph) { return ifCompare(ph, compareAlnum,    relLt); }},
+        {"{if_>=(",         [](const std::string& ph) { return ifCompare(ph, compareAlnum,    relGe); }},
+        {"{if_<=(",         [](const std::string& ph) { return ifCompare(ph, compareAlnum,    relLe); }},
+        {"{if_version_>(",  [](const std::string& ph) { return ifCompare(ph, compareVersions, relGt); }},
+        {"{if_version_<(",  [](const std::string& ph) { return ifCompare(ph, compareVersions, relLt); }},
+        {"{if_version_>=(", [](const std::string& ph) { return ifCompare(ph, compareVersions, relGe); }},
+        {"{if_version_<=(", [](const std::string& ph) { return ifCompare(ph, compareVersions, relLe); }},
     };
 
     updateGeneralPlaceholders();
@@ -3187,8 +3498,12 @@ bool applyPlaceholderReplacements(std::vector<std::string>& cmd, const std::stri
 
 
 
-// forward declarartion
+// forward declarations
 void processCommand(const std::vector<std::string>& cmd, const std::string& packagePath, const std::string& selectedCommand);
+inline bool txtLineExists(const std::string& filePath, const std::string& line);
+inline bool hexValMatches(const std::string& filePath, uint32_t offset, std::string expectedHex);
+inline bool moduleExists(u64 programId);
+inline bool moduleIsActive(u64 programId);
 
 
 /**
@@ -3251,7 +3566,7 @@ bool applyPlaceholderReplacementsToCommands(std::vector<std::vector<std::string>
         }
 
         // Apply placeholder replacements
-        applyPlaceholderReplacements(cmd, hexPath, iniPath, listString, listPath, jsonString, jsonPath);
+        applyPlaceholderReplacements(cmd, hexPath, iniPath, listString, listPath, jsonString, jsonPath, packagePath);
 
         // Handle special commands
         const size_t cmdSize = cmd.size();
@@ -3492,7 +3807,7 @@ bool interpretAndExecuteCommands(std::vector<std::vector<std::string>>&& command
         }
         
         if (hasPlaceholders) {
-            applyPlaceholderReplacements(cmd, hexPath, iniPath, listString, listPath, jsonString, jsonPath);
+            applyPlaceholderReplacements(cmd, hexPath, iniPath, listString, listPath, jsonString, jsonPath, packagePath);
         }
 
         #if USING_LOGGING_DIRECTIVE
@@ -3794,7 +4109,9 @@ void handleMirrorCommand(const std::vector<std::string>& cmd, const std::string&
     
     // Determine operation type using string_view to avoid string creation
     const std::string_view commandName = cmd[0];
-    const std::string operation = (commandName == "mirror_copy" || commandName == "mirror_cp") ? "copy" : "delete";
+    const std::string operation =
+        (commandName == "mirror-copy" || commandName == "mirror-cp" ||
+         commandName == "mirror_copy" || commandName == "mirror_cp") ? "copy" : "delete";
     
     if (sourcePath.find('*') == std::string::npos) {
         // Single directory mirror
@@ -4008,7 +4325,7 @@ void handleIniCommands(const std::vector<std::string>& cmd, const std::string& p
         removeQuotes(desiredValue);
         
         if (!ult::isFile(sourcePath))
-            commandSuccess.store(false, std::memory_order_release);
+            setCommandFailed();
 
         // desiredSection here is the pattern key
         addKeyToMatchingSections(sourcePath, desiredSection, desiredKey, desiredValue);
@@ -4020,7 +4337,7 @@ void handleIniCommands(const std::vector<std::string>& cmd, const std::string& p
         removeQuotes(desiredKey);
         
         if (!ult::isFile(sourcePath))
-            commandSuccess.store(false, std::memory_order_release);
+            setCommandFailed();
 
         // desiredSection here is the pattern key
         removeKeyFromMatchingSections(sourcePath, desiredSection, desiredKey);
@@ -4171,6 +4488,9 @@ inline std::string getUnquoted(const std::vector<std::string>& cmd, size_t index
 inline void setCommandFailed() {
     commandSuccess.store(false, std::memory_order_release);
 }
+inline void setCommandResult(bool result) {
+    commandSuccess.store(result, std::memory_order_release);
+}
 
 void executeCommands(std::vector<std::vector<std::string>> commands) {
     interpretAndExecuteCommands(std::move(commands), "", "");
@@ -4185,6 +4505,65 @@ void executeIniCommands(const std::string &iniPath, const std::string &section, 
             resetPercentages();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// ipcDispatch — open a service via smGetServiceOriginal (non-blocking), send
+// a void->void command, close the session, and return the dispatch Result.
+// Returns a failed Result immediately if the service is not registered.
+// ---------------------------------------------------------------------------
+static inline Result ipcDispatch(const char* svcName, u32 enumCmd) {
+    Handle handle = INVALID_HANDLE;
+    Result rc = smGetServiceOriginal(&handle, smEncodeName(svcName));
+    if (R_FAILED(rc)) return rc;
+    Service srv = {};
+    serviceCreate(&srv, handle);
+    rc = serviceDispatch(&srv, enumCmd);
+    serviceClose(&srv);
+    return rc;
+}
+
+// ---------------------------------------------------------------------------
+// Parse a TID string (bare 16-hex-char or 0x-prefixed) to u64.
+// Returns 0 on empty / invalid input.
+static inline u64 parseTid(const std::string& s) {
+    if (s.empty()) return 0;
+    const char* p = s.c_str();
+    if (s.size() > 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
+    return static_cast<u64>(std::strtoull(p, nullptr, 16));
+}
+
+// Returns true when the module's content folder exists under /atmosphere/contents/.
+// This is true whether the module is currently running or not.
+inline bool moduleExists(u64 programId) {
+    if (programId == 0) return false;
+    char path[FS_MAX_PATH];
+    std::snprintf(path, sizeof(path), "/atmosphere/contents/%016lX", programId);
+    return isDirectory(path);
+}
+
+// Returns true when the module is currently running (has an active process ID).
+inline bool moduleIsActive(u64 programId) {
+    if (programId == 0) return false;
+    u64 pid = 0;
+    return R_SUCCEEDED(pmdmntGetProcessId(&pid, programId)) && pid != 0;
+}
+
+// ipcPollExit — poll pmdmnt every 50 ms for up to 200 ms waiting for a
+// process to disappear. Returns true as soon as the process is gone.
+// ---------------------------------------------------------------------------
+static inline bool ipcPollExit(u64 programId) {
+    constexpr u64 kInterval = 50'000'000ULL;
+    constexpr u64 kTimeout  = 200'000'000ULL;
+    u64 elapsed = 0;
+    while (elapsed < kTimeout) {
+        u64 pid = 0;
+        if (R_FAILED(pmdmntGetProcessId(&pid, programId)) || pid == 0)
+            return true;
+        svcSleepThread(kInterval);
+        elapsed += kInterval;
+    }
+    return false;
 }
 
 // Main processCommand function
@@ -4389,7 +4768,7 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
             
         case 'f':
             if (commandName == "force_failure") {
-                commandSuccess.store(false, std::memory_order_release);
+                setCommandFailed();
                 return;
             } if (commandName == "flag") {
                 if (cmdSize >= 3) {
@@ -4447,6 +4826,34 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
             }
             break;
             
+        case 'i':
+            if (commandName == "ipc_exists") {
+                // ipc_exists <SERVICE_NAME>  — success when service is registered.
+                // smGetServiceOriginal never blocks on an unregistered name.
+                if (cmdSize >= 2) {
+                    Handle handle = INVALID_HANDLE;
+                    const bool registered = R_SUCCEEDED(
+                        smGetServiceOriginal(&handle, smEncodeName(cmd[1].c_str())));
+                    if (registered) svcCloseHandle(handle);
+                    setCommandResult(registered);
+                }
+                return;
+            }
+            if (commandName == "ipc-exec") {
+                // ipc-exec <SERVICE_NAME> <ENUM_CMD>
+                // Sends a void->void IPC command. Success = dispatch accepted.
+                if (cmdSize >= 3) {
+                    const u32 enumCmd = static_cast<u32>(ult::stoi(cmd[2]));
+                    commandSuccess.store(
+                        R_SUCCEEDED(ipcDispatch(cmd[1].c_str(), enumCmd)),
+                        std::memory_order_release);
+                } else {
+                    setCommandFailed();
+                }
+                return;
+            }
+            break;
+
         case 'l':
             if (commandName == "logging") {
                 interpreterLogging.store(true, std::memory_order_release);
@@ -4463,8 +4870,154 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
                 handleMoveCommand(cmd, packagePath);
                 return;
             }
-            if (commandName.compare(0, 7, "mirror_") == 0) {
+            // legacy support for `mirror_`
+            if ((commandName.compare(0, 7, "mirror_") == 0) || (commandName.compare(0, 7, "mirror-") == 0)) {
                 handleMirrorCommand(cmd, packagePath);
+                return;
+            }
+            if (commandName == "matching_txt_line") {
+                // [!]matching_txt_line <path> <line...>
+                if (cmdSize >= 3) {
+                    std::string path = cmd[1];
+                    preprocessPath(path, packagePath);
+                    std::string line = getUnquoted(cmd, 2);
+                    for (size_t i = 3; i < cmdSize; ++i) { line += ' '; line += getUnquoted(cmd, i); }
+                    const bool match = txtLineExists(path, line);
+                    setCommandResult(match);
+                } else { setCommandFailed(); }
+                return;
+            }
+            if (commandName == "matching_hex_val") {
+                // [!]matching_hex_val <path> <offset> <hex>
+                if (cmdSize >= 4) {
+                    std::string path = cmd[1];
+                    preprocessPath(path, packagePath);
+                    const uint32_t offset = static_cast<uint32_t>(
+                        isValidNumber(cmd[2]) ? std::strtoul(cmd[2].c_str(), nullptr, 0) : 0u);
+                    const bool match = hexValMatches(path, offset, getUnquoted(cmd, 3));
+                    setCommandResult(match);
+                } else { setCommandFailed(); }
+                return;
+            }
+            if (commandName == "matching_ini_val") {
+                // [!]matching_ini_val <path> <section> <key> <value...>
+                if (cmdSize >= 5) {
+                    std::string path = cmd[1];
+                    preprocessPath(path, packagePath);
+                    std::string expected = getUnquoted(cmd, 4);
+                    for (size_t i = 5; i < cmdSize; ++i) { expected += ' '; expected += getUnquoted(cmd, i); }
+                    std::string actual = parseValueFromIniSection(path, getUnquoted(cmd, 2), getUnquoted(cmd, 3));
+                    removeQuotes(actual);
+                    setCommandResult(actual == expected);
+                } else { setCommandFailed(); }
+                return;
+            }
+            if (commandName == "module_exists") {
+                const bool exists = cmdSize >= 2 && moduleExists(parseTid(cmd[1]));
+                setCommandResult(exists);
+                return;
+            }
+            if (commandName == "module_is_active") {
+                const bool active = cmdSize >= 2 && moduleIsActive(parseTid(cmd[1]));
+                setCommandResult(active);
+                return;
+            }
+            if (commandName == "module") {
+                // module start <TID> — launch a sysmodule by program ID.
+                // module stop  <TID> — stop a sysmodule, graceful-first with
+                //                      force-kill fallback for dynamic modules.
+                // Refuses start/stop of static modules with no graceful contract.
+                // <TID>: bare 16-hex-char folder name or 0x-prefixed program ID.
+                if (cmdSize >= 3) {
+                    const std::string& subcmd = cmd[1];
+                    const char* tidCStr = cmd[2].c_str();
+                    if (cmd[2].size() > 2 && tidCStr[0] == '0' &&
+                        (tidCStr[1] == 'x' || tidCStr[1] == 'X'))
+                        tidCStr += 2;
+                    const u64 programId = static_cast<u64>(
+                        std::strtoull(tidCStr, nullptr, 16));
+                    if (programId == 0) {
+                        setCommandFailed();
+                        return;
+                    }
+
+                    // Read toolbox.json — safe defaults if absent.
+                    bool needReboot  = true;
+                    bool hasGraceful = false;
+                    char gracefulSvc[16] = {};
+                    u32  gracefulCmd = 0;
+                    {
+                        char tbPath[FS_MAX_PATH];
+                        std::snprintf(tbPath, sizeof(tbPath),
+                            "/atmosphere/contents/%016lX/toolbox.json", programId);
+                        FILE* fp = std::fopen(tbPath, "rb");
+                        if (fp) {
+                            std::fseek(fp, 0, SEEK_END);
+                            const long sz = std::ftell(fp);
+                            if (sz > 0 && sz <= 4096) {
+                                std::fseek(fp, 0, SEEK_SET);
+                                char tbBuf[4096];
+                                if (std::fread(tbBuf, 1, sz, fp) == static_cast<size_t>(sz)) {
+                                    tbBuf[sz] = '\0';
+                                    cJSON* tb = cJSON_ParseWithLength(tbBuf, sz);
+                                    if (tb) {
+                                        cJSON* ri = cJSON_GetObjectItem(tb, "requires_reboot");
+                                        if (ri && cJSON_IsBool(ri))
+                                            needReboot = static_cast<bool>(cJSON_IsTrue(ri));
+                                        cJSON* si = cJSON_GetObjectItem(tb, "shutdown_service");
+                                        cJSON* ci = cJSON_GetObjectItem(tb, "shutdown_cmd");
+                                        if (si && cJSON_IsString(si) && ci && cJSON_IsNumber(ci)) {
+                                            const size_t svcLen = std::strlen(si->valuestring);
+                                            if (svcLen > 0 && svcLen <= 8 && ci->valueint >= 0) {
+                                                std::memcpy(gracefulSvc, si->valuestring, svcLen);
+                                                gracefulSvc[svcLen] = '\0';
+                                                gracefulCmd = static_cast<u32>(ci->valueint);
+                                                hasGraceful = true;
+                                            }
+                                        }
+                                        cJSON_Delete(tb);
+                                    }
+                                }
+                            }
+                            std::fclose(fp);
+                        }
+                    }
+
+                    // Static modules with no graceful contract cannot be toggled.
+                    if (needReboot && !hasGraceful) {
+                        setCommandFailed();
+                        return;
+                    }
+
+                    if (subcmd == "start") {
+                        pmshellInitialize();
+                        const NcmProgramLocation loc{
+                            .program_id = programId,
+                            .storageID  = NcmStorageId_None,
+                        };
+                        u64 pid = 0;
+                        const bool ok = R_SUCCEEDED(pmshellLaunchProgram(0, &loc, &pid));
+                        pmshellExit();
+                        setCommandResult(ok);
+
+                    } else if (subcmd == "stop") {
+                        bool stopped = false;
+                        if (hasGraceful &&
+                            R_SUCCEEDED(ipcDispatch(gracefulSvc, gracefulCmd)))
+                            stopped = ipcPollExit(programId);
+                        if (!stopped && !needReboot) {
+                            pmshellInitialize();
+                            stopped = R_SUCCEEDED(pmshellTerminateProgram(programId));
+                            pmshellExit();
+                        }
+                        setCommandResult(stopped);
+
+                    } else {
+                        setCommandFailed();
+                    }
+                } else {
+                    setCommandFailed();
+                }
                 return;
             }
             break;
@@ -4514,6 +5067,14 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
                                             alignment,
                                             splitStr);
                 }
+                return;
+            }
+            if (commandName == "ntp-sync") {
+                // ntp-sync <url>  — on-demand clock sync; checks internet access internally
+                if (cmdSize >= 2) {
+                    std::string url = getUnquoted(cmd, 1);
+                    setCommandResult(ult::syncNtp(url));
+                } else { setCommandFailed(); }
                 return;
             }
             break;
@@ -4570,11 +5131,7 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
                 if (cmdSize >= 2) {
                     std::string sourcePath = cmd[1];
                     preprocessPath(sourcePath, packagePath);
-                    if (ult::isFileOrDirectory(sourcePath)) {
-                        commandSuccess.store(true, std::memory_order_release);
-                    } else {
-                        commandSuccess.store(false, std::memory_order_release);
-                    }
+                    setCommandResult(ult::isFileOrDirectory(sourcePath));
                 }
             }
             if (commandName == "pchtxt2ips") {
@@ -4632,7 +5189,13 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
                         refreshPackage.store(true, std::memory_order_release);
                     else if (refreshPattern == "wallpaper")
                         refreshWallpaperNow.store(true, std::memory_order_release);
+                    else if (refreshPattern == "combos")
+                        ult::refreshCombos.store(true, std::memory_order_release);
                 }
+                return;
+            }
+            if (commandName == "refresh-return") {
+                refreshReturnAfter.store(true, std::memory_order_release);
                 return;
             }
             if (cmdSize > 1 && commandName == "refresh-to") {
@@ -4748,6 +5311,7 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
                 i2cExit();
                 splExit();
                 fsdevUnmountAll();
+                Payload::StageUsbPdTeardown();
                 spsmShutdown(SpsmShutdownMode_Reboot);
                 spsmExit();
                 return;
@@ -4811,10 +5375,9 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
                         powerOffAllControllers();
                     }
                 } else {
-                    splExit();
                     fsdevUnmountAll();
-                    spsmShutdown(SpsmShutdownMode_Normal);
-                    spsmExit();
+                    Payload::StageUsbPdTeardown();
+                    (void)spsmShutdown(SpsmShutdownMode_Normal);
                 }
                 return;
             }
@@ -4878,20 +5441,263 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
             break;
 
         case '!':
+            if (commandName == "!ipc_exists") {
+                // !ipc_exists <SERVICE_NAME> — success when NOT registered.
+                if (cmdSize >= 2) {
+                    Handle handle = INVALID_HANDLE;
+                    const bool registered = R_SUCCEEDED(
+                        smGetServiceOriginal(&handle, smEncodeName(cmd[1].c_str())));
+                    if (registered) svcCloseHandle(handle);
+                    setCommandResult(!registered);
+                }
+                return;
+            }
+            if (commandName == "!matching_txt_line") {
+                // !matching_txt_line <path> <line...>
+                if (cmdSize >= 3) {
+                    std::string path = cmd[1];
+                    preprocessPath(path, packagePath);
+                    std::string line = getUnquoted(cmd, 2);
+                    for (size_t i = 3; i < cmdSize; ++i) { line += ' '; line += getUnquoted(cmd, i); }
+                    setCommandResult(!txtLineExists(path, line));
+                } else { setCommandFailed(); }
+                return;
+            }
+            if (commandName == "!matching_hex_val") {
+                // !matching_hex_val <path> <offset> <hex>
+                if (cmdSize >= 4) {
+                    std::string path = cmd[1];
+                    preprocessPath(path, packagePath);
+                    const uint32_t offset = static_cast<uint32_t>(
+                        isValidNumber(cmd[2]) ? std::strtoul(cmd[2].c_str(), nullptr, 0) : 0u);
+                    setCommandResult(!hexValMatches(path, offset, getUnquoted(cmd, 3)));
+                } else { setCommandFailed(); }
+                return;
+            }
+            if (commandName == "!matching_ini_val") {
+                // !matching_ini_val <path> <section> <key> <value...>
+                if (cmdSize >= 5) {
+                    std::string path = cmd[1];
+                    preprocessPath(path, packagePath);
+                    std::string expected = getUnquoted(cmd, 4);
+                    for (size_t i = 5; i < cmdSize; ++i) { expected += ' '; expected += getUnquoted(cmd, i); }
+                    std::string actual = parseValueFromIniSection(path, getUnquoted(cmd, 2), getUnquoted(cmd, 3));
+                    removeQuotes(actual);
+                    setCommandResult(actual != expected);
+                } else { setCommandFailed(); }
+                return;
+            }
+            if (commandName == "!module_exists") {
+                setCommandResult(cmdSize >= 2 && !moduleExists(parseTid(cmd[1])));
+                return;
+            }
+            if (commandName == "!module_is_active") {
+                setCommandResult(cmdSize >= 2 && !moduleIsActive(parseTid(cmd[1])));
+                return;
+            }
             if (commandName == "!path_exists") {
                 if (cmdSize >= 2) {
                     std::string sourcePath = cmd[1];
                     preprocessPath(sourcePath, packagePath);
-                    if (ult::isFileOrDirectory(sourcePath)) {
-                        commandSuccess.store(false, std::memory_order_release);
-                    } else {
-                        commandSuccess.store(true, std::memory_order_release);
-                    }
+                    setCommandResult(!ult::isFileOrDirectory(sourcePath));
                 }
+                return;
             }
     }
 }
 
+
+
+// ---------------------------------------------------------------------------
+// Menu condition helpers
+//
+// Backing checks and the evaluator for the ;visibility_condition= and
+// ;toggle_state_condition= option directives. A condition is a single string
+// of the form "<mode> <args...>" with these modes:
+//
+//   path_exists       <path>
+//   ipc_exists        <service_name>
+//   module_exists     <TID>
+//   module_is_active  <TID>
+//   matching_txt_line <path> <line>
+//   matching_hex_val  <path> <offset> <hex>
+//   matching_ini_val  <path> <section> <key> <value>
+//
+// Prefix any mode with ! to negate: !path_exists, !module_exists, etc.
+//
+// The final free-text field (line / value) keeps any embedded spaces.
+// ---------------------------------------------------------------------------
+
+// Returns true when an exact line (trailing CR/LF stripped) exists in a file.
+// Full-line comparison: a target that is only a substring of a longer line does
+// not match. Lines longer than the read buffer are skipped, not partially
+// compared.
+inline bool txtLineExists(const std::string& filePath, const std::string& line) {
+    if (!isFile(filePath)) return false;
+    FILE* file = fopen(filePath.c_str(), "r");
+    if (!file) return false;
+
+    char buffer[1024];
+    bool found = false;
+    bool skipUntilNewline = false;
+    while (fgets(buffer, sizeof(buffer), file)) {
+        size_t len = std::strlen(buffer);
+        const bool hasNewline = (len > 0 && buffer[len - 1] == '\n');
+
+        if (skipUntilNewline) {
+            // Previous chunk was a partial read of an over-long line; skip the rest.
+            skipUntilNewline = !hasNewline;
+            continue;
+        }
+        if (!hasNewline && !feof(file)) {
+            // Line is longer than the buffer; skip the remainder and do not compare.
+            skipUntilNewline = true;
+            continue;
+        }
+
+        // Strip trailing CR/LF.
+        while (len > 0 && (buffer[len - 1] == '\n' || buffer[len - 1] == '\r')) {
+            buffer[--len] = '\0';
+        }
+
+        if (line.size() == len && std::memcmp(buffer, line.c_str(), len) == 0) {
+            found = true;
+            break;
+        }
+    }
+    fclose(file);
+    return found;
+}
+
+// Returns true when the bytes at offset match expectedHex. The hex string is
+// validated (even length, hex digits only, spaces ignored) before the file is
+// opened, so malformed input simply returns false.
+inline bool hexValMatches(const std::string& filePath, uint32_t offset, std::string expectedHex) {
+    if (!isFile(filePath)) return false;
+
+    // Strip spaces in-place, then validate length and characters.
+    size_t w = 0;
+    for (size_t r = 0; r < expectedHex.size(); ++r) {
+        if (expectedHex[r] != ' ') expectedHex[w++] = expectedHex[r];
+    }
+    expectedHex.resize(w);
+    if (expectedHex.empty() || (expectedHex.size() % 2) != 0) return false;
+    for (size_t i = 0; i < expectedHex.size(); ++i) {
+        if (!std::isxdigit(static_cast<unsigned char>(expectedHex[i]))) return false;
+    }
+
+    FILE* file = fopen(filePath.c_str(), "rb");
+    if (!file) return false;
+
+    if (fseek(file, static_cast<long>(offset), SEEK_SET) != 0) {
+        fclose(file);
+        return false;
+    }
+
+    const size_t len = expectedHex.size() / 2;
+    std::vector<unsigned char> buffer(len);
+    const size_t readLen = fread(buffer.data(), 1, len, file);
+    fclose(file);
+
+    if (readLen < len) return false;
+
+    for (size_t i = 0; i < len; ++i) {
+        unsigned int byte = 0;
+        if (std::sscanf(expectedHex.c_str() + i * 2, "%2x", &byte) != 1) return false;
+        if (buffer[i] != static_cast<unsigned char>(byte)) return false;
+    }
+    return true;
+}
+
+// Evaluates a "<mode> <args...>" condition string. Returns true when satisfied.
+// Used by both ;visibility_condition= (true -> shown) and
+// ;toggle_state_condition= (true -> ON). An empty condition returns true; an
+// unknown mode or missing argument returns false.
+inline bool evaluateMenuCondition(std::string condition, const std::string& packagePath) {
+    removeQuotes(condition);
+    replacePlaceholdersInArg(condition, generalPlaceholders);
+
+    size_t pos = 0;
+    const size_t end = condition.size();
+
+    // Pull the next space-delimited token starting at pos.
+    auto nextToken = [&]() -> std::string {
+        while (pos < end && condition[pos] == ' ') ++pos;
+        const size_t start = pos;
+        while (pos < end && condition[pos] != ' ') ++pos;
+        return condition.substr(start, pos - start);
+    };
+    // The remaining text after pos, leading spaces trimmed (free-text field).
+    auto remainder = [&]() -> std::string {
+        while (pos < end && condition[pos] == ' ') ++pos;
+        std::string rest = condition.substr(pos);
+        removeQuotes(rest);
+        return rest;
+    };
+
+    std::string mode = nextToken();
+    if (mode.empty()) return true;
+
+    const bool negate = !mode.empty() && mode[0] == '!';
+    if (negate) mode.erase(0, 1);
+    if (mode.empty()) return true;
+
+    if (mode == "path_exists") {
+        std::string path = nextToken();
+        if (path.empty()) return false;
+        preprocessPath(path, packagePath);
+        return negate ^ isFileOrDirectory(path);
+    }
+    if (mode == "ipc_exists") {
+        const std::string service = nextToken();
+        if (service.empty()) return false;
+        Handle handle = INVALID_HANDLE;
+        const bool registered = R_SUCCEEDED(
+            smGetServiceOriginal(&handle, smEncodeName(service.c_str())));
+        if (registered) svcCloseHandle(handle);
+        return negate ^ registered;
+    }
+    if (mode == "module_exists") {
+        const std::string tid = nextToken();
+        if (tid.empty()) return false;
+        return negate ^ moduleExists(parseTid(tid));
+    }
+    if (mode == "module_is_active") {
+        const std::string tid = nextToken();
+        if (tid.empty()) return false;
+        return negate ^ moduleIsActive(parseTid(tid));
+    }
+    if (mode == "matching_txt_line") {
+        std::string path = nextToken();
+        const std::string line = remainder();
+        if (path.empty() || line.empty()) return false;
+        preprocessPath(path, packagePath);
+        return negate ^ txtLineExists(path, line);
+    }
+    if (mode == "matching_hex_val") {
+        std::string path = nextToken();
+        const std::string offsetStr = nextToken();
+        const std::string hex = remainder();
+        if (path.empty() || offsetStr.empty() || hex.empty()) return false;
+        preprocessPath(path, packagePath);
+        uint32_t offset = 0;
+        if (isValidNumber(offsetStr))
+            offset = static_cast<uint32_t>(std::strtoul(offsetStr.c_str(), nullptr, 0));
+        return negate ^ hexValMatches(path, offset, hex);
+    }
+    if (mode == "matching_ini_val") {
+        std::string path = nextToken();
+        const std::string section = nextToken();
+        const std::string key = nextToken();
+        const std::string expected = remainder();
+        if (path.empty() || section.empty() || key.empty()) return false;
+        preprocessPath(path, packagePath);
+        std::string currentVal = parseValueFromIniSection(path, section, key);
+        removeQuotes(currentVal);
+        return negate ^ (currentVal == expected);
+    }
+    return negate ^ false;
+}
 
 
 // Thread information structure
@@ -5065,7 +5871,7 @@ void executeInterpreterCommands(std::vector<std::vector<std::string>>&& commands
     const int result = threadCreate(&interpreterThread, backgroundInterpreter, workData, nullptr, stackSize, 0x2B, -2);
     if (result != 0) {
         // Handle thread creation failure
-        commandSuccess.store(false, std::memory_order_release);
+        setCommandFailed();
         clearInterpreterFlags();
         runningInterpreter.store(false, std::memory_order_release);
         
