@@ -100,6 +100,8 @@ constexpr std::string_view MODE_PATTERN = ";mode=";
 constexpr std::string_view GROUPING_PATTERN = ";grouping=";
 constexpr std::string_view FOOTER_PATTERN = ";footer=";
 constexpr std::string_view FOOTER_HIGHLIGHT_PATTERN = ";footer_highlight=";
+constexpr std::string_view FOOTER_COLOR_PATTERN = ";footer_color="; // rgb888 hex, e.g. "#RRGGBB" or "RRGGBB"
+constexpr std::string_view TEXT_COLOR_PATTERN = ";text_color="; // rgb888 hex, e.g. "#RRGGBB" or "RRGGBB"
 constexpr std::string_view HOLD_PATTERN = ";hold=";
 
 constexpr std::string_view VISIBILITY_CONDITION_PATTERN = ";visibility_condition=";
@@ -117,6 +119,8 @@ constexpr std::string_view SCROLLABLE_PATTERN = ";scrollable=";
 constexpr std::string_view TOP_PIVOT_PATTERN = ";top_pivot=";
 constexpr std::string_view BOTTOM_PIVOT_PATTERN = ";bottom_pivot=";
 constexpr std::string_view BACKGROUND_PATTERN = ";background="; // true or false
+constexpr std::string_view BG_COLOR_PATTERN = ";bg_color="; // rgb888 hex, e.g. "#RRGGBB" or "RRGGBB"
+constexpr std::string_view BORDER_PATTERN = ";border="; // true or false
 constexpr std::string_view HEADER_INDENT_PATTERN = ";header_indent="; // true or false
 constexpr std::string_view ALIGNMENT_PATTERN = ";alignment=";
 constexpr std::string_view WRAPPING_MODE_PATTERN = ";wrapping_mode="; // "none", "char", "word"
@@ -147,6 +151,8 @@ constexpr size_t MODE_PATTERN_LEN = MODE_PATTERN.size();
 constexpr size_t GROUPING_PATTERN_LEN = GROUPING_PATTERN.size();
 constexpr size_t FOOTER_PATTERN_LEN = FOOTER_PATTERN.size();
 constexpr size_t FOOTER_HIGHLIGHT_PATTERN_LEN = FOOTER_HIGHLIGHT_PATTERN.size();
+constexpr size_t FOOTER_COLOR_PATTERN_LEN = FOOTER_COLOR_PATTERN.size();
+constexpr size_t TEXT_COLOR_PATTERN_LEN = TEXT_COLOR_PATTERN.size();
 constexpr size_t HOLD_PATTERN_LEN = HOLD_PATTERN.size();
 constexpr size_t VISIBILITY_CONDITION_PATTERN_LEN = VISIBILITY_CONDITION_PATTERN.size();
 constexpr size_t TOGGLE_STATE_CONDITION_PATTERN_LEN = TOGGLE_STATE_CONDITION_PATTERN.size();
@@ -158,6 +164,8 @@ constexpr size_t SCROLLABLE_PATTERN_LEN = SCROLLABLE_PATTERN.size();
 constexpr size_t TOP_PIVOT_PATTERN_LEN = TOP_PIVOT_PATTERN.size();
 constexpr size_t BOTTOM_PIVOT_PATTERN_LEN = BOTTOM_PIVOT_PATTERN.size();
 constexpr size_t BACKGROUND_PATTERN_LEN = BACKGROUND_PATTERN.size();
+constexpr size_t BG_COLOR_PATTERN_LEN = BG_COLOR_PATTERN.size();
+constexpr size_t BORDER_PATTERN_LEN = BORDER_PATTERN.size();
 constexpr size_t HEADER_INDENT_PATTERN_LEN = HEADER_INDENT_PATTERN.size();
 constexpr size_t START_GAP_PATTERN_LEN = START_GAP_PATTERN.size();
 constexpr size_t END_GAP_PATTERN_LEN = END_GAP_PATTERN.size();
@@ -360,8 +368,15 @@ bool handleRunningInterpreter(uint64_t& keysDown, uint64_t& keysHeld) {
     }
     
     // Other input handling
-    if ((keysDown & KEY_B) && !(keysHeld & ~KEY_B & ALL_KEYS_MASK) && !stillTouching.load(acquire)) {
+    // X hides the overlay while a command is running (moved off B to prevent
+    // accidental hides when the user reflexively presses B to "go back").
+    if ((keysDown & KEY_X) && !(keysHeld & ~KEY_X & ALL_KEYS_MASK) && !stillTouching.load(acquire)) {
         tsl::Overlay::get()->hide();
+        return true;
+    }
+    // Swallow B during a running command: consume it so it neither hides nor pops the GUI.
+    if ((keysDown & KEY_B) && !(keysHeld & ~KEY_B & ALL_KEYS_MASK)) {
+        return true;
     }
     
     if (threadFailure.exchange(false, std::memory_order_acq_rel)) {
@@ -775,6 +790,9 @@ private:
                     deleteFileOrDirectory(SETTINGS_PATH+"RELEASE.ini");
                     downloadFile(LATEST_RELEASE_INFO_URL, SETTINGS_PATH, false, true);
                 } else if (targetMenu == "themeMenu") {
+                    if (!isFile(THEMES_PATH+"classic.ini")) {
+                        downloadFile(INCLUDED_THEME_FOLDER_URL+"classic.ini", THEMES_PATH, false, true);
+                    }
                     if (!isFile(THEMES_PATH+"ultra.ini")) {
                         downloadFile(INCLUDED_THEME_FOLDER_URL+"ultra.ini", THEMES_PATH, false, true);
                     }
@@ -1924,7 +1942,7 @@ public:
             addHeader(list, THEME_SETTINGS);
             useSwitch2Style = getBoolValue("switch_2_style", true); // TRUE_STR default
             createToggleListItem(list, SWITCH_2_STYLE, useSwitch2Style, "switch_2_style");
-            useDynamicLogo = getBoolValue("dynamic_logo", true); // TRUE_STR default
+            useDynamicLogo = getBoolValue("dynamic_logo", false); // FALSE_STR default
             createToggleListItem(list, DYNAMIC_LOGO, useDynamicLogo, "dynamic_logo");
             useDynamicTableColors = getBoolValue("dynamic_tables", true); // TRUE_STR default
             createToggleListItem(list, DYNAMIC_TABLES, useDynamicTableColors, "dynamic_tables");
@@ -1942,6 +1960,8 @@ public:
             createToggleListItem(list, PACKAGE_TITLES, usePackageTitles, "package_titles", false, true);
             usePackageVersions = getBoolValue("package_versions", true); // TRUE_STR default
             createToggleListItem(list, PACKAGE_VERSIONS, usePackageVersions, "package_versions", false, true);
+            useInPackageTitles = getBoolValue("in_package_titles", true); // TRUE_STR default
+            createToggleListItem(list, IN_PACKAGE_TITLES, useInPackageTitles, "in_package_titles", false, true);
         }
 
         auto* rootFrame = new tsl::elm::OverlayFrame(CAPITAL_ULTRAHAND_PROJECT_NAME, versionLabel);
@@ -2091,7 +2111,7 @@ public:
                 returningToSettings = true;
                 
                 if (reloadMenu2) {
-                    tsl::swapTo<UltrahandSettingsMenu>(SwapDepth(3));
+                    tsl::swapTo<UltrahandSettingsMenu>(SwapDepth(1));
                     reloadMenu2 = false;
                 } else {
                     tsl::goBack();
@@ -4502,6 +4522,8 @@ bool drawCommandsMenu(
     std::string commandFooter;
     bool commandFooterHighlight;
     bool commandFooterHighlightDefined;
+    std::string commandFooterColor;
+    std::string commandTextColor;
     bool isHold;
 
     std::string commandSystem;
@@ -4542,6 +4564,8 @@ bool drawCommandsMenu(
     size_t tableStartGap, tableEndGap, tableColumnOffset, tableSpacing;
     std::string tableSectionTextColor, tableInfoTextColor, tableAlignment;
     std::string tableWrappingMode;
+    std::string tableBgColor;
+    bool tableDrawBorder;
 
     bool useWrappingIndent;
 
@@ -4607,6 +4631,8 @@ bool drawCommandsMenu(
         tableAlignment = RIGHT_STR;
         tableWrappingMode = "none";
         useWrappingIndent = false;
+        tableBgColor = DEFAULT_STR;
+        tableDrawBorder = true;
 
         // Trackbar settings
         minValue = 0;
@@ -4618,6 +4644,8 @@ bool drawCommandsMenu(
         commandFooter = "";
         commandFooterHighlight = false;
         commandFooterHighlightDefined = false;
+        commandFooterColor = DEFAULT_STR;
+        commandTextColor = DEFAULT_STR;
         isHold = false;
         commandSystem = DEFAULT_STR;
         commandRAMSize = DEFAULT_STR;
@@ -4703,6 +4731,8 @@ bool drawCommandsMenu(
                         // First, scan for patterns to establish defaults
                         bool foundFooter = false;
                         bool foundFooterHighlight = false;
+                        bool foundFooterColor = false;
+                        bool foundTextColor = false;
                         
                         for (const auto& command : commands) {
                             {
@@ -4715,7 +4745,7 @@ bool drawCommandsMenu(
                                     
                                     switch (secondChar) {
                                         case 'f':
-                                            // Could be ;footer= or ;footer_highlight=
+                                            // Could be ;footer=, ;footer_highlight=, or ;footer_color=
                                             if (!foundFooter && cmdLen > FOOTER_PATTERN_LEN && _commandName[7] == '=') {
                                                 if (_commandName.compare(0, FOOTER_PATTERN_LEN, FOOTER_PATTERN) == 0) {
                                                     commandFooter = _commandName.substr(FOOTER_PATTERN_LEN);
@@ -4725,21 +4755,38 @@ bool drawCommandsMenu(
                                                     }
                                                     removeQuotes(commandFooter);
                                                     foundFooter = true;
-                                                    if (foundFooterHighlight) break; // Early exit
                                                 }
                                             }
                                             
-                                            if (!foundFooterHighlight && cmdLen >= FOOTER_HIGHLIGHT_PATTERN_LEN + TRUE_STR_LEN && _commandName[7] == '_') {
+                                            if (!foundFooterHighlight && cmdLen >= FOOTER_HIGHLIGHT_PATTERN_LEN + TRUE_STR_LEN && _commandName[7] == '_' && _commandName[8] == 'h') {
                                                 if (parseBoolFlag(_commandName, FOOTER_HIGHLIGHT_PATTERN, commandFooterHighlight)) {
                                                     commandFooterHighlightDefined = true;
                                                     foundFooterHighlight = true;
                                                 }
                                             }
+
+                                            if (!foundFooterColor && cmdLen > FOOTER_COLOR_PATTERN_LEN && _commandName[7] == '_' && _commandName[8] == 'c') {
+                                                if (_commandName.compare(0, FOOTER_COLOR_PATTERN_LEN, FOOTER_COLOR_PATTERN) == 0) {
+                                                    commandFooterColor = _commandName.substr(FOOTER_COLOR_PATTERN_LEN);
+                                                    removeQuotes(commandFooterColor);
+                                                    foundFooterColor = true;
+                                                }
+                                            }
+                                            break;
+                                        case 't':
+                                            // ;text_color=
+                                            if (!foundTextColor && cmdLen > TEXT_COLOR_PATTERN_LEN) {
+                                                if (_commandName.compare(0, TEXT_COLOR_PATTERN_LEN, TEXT_COLOR_PATTERN) == 0) {
+                                                    commandTextColor = _commandName.substr(TEXT_COLOR_PATTERN_LEN);
+                                                    removeQuotes(commandTextColor);
+                                                    foundTextColor = true;
+                                                }
+                                            }
                                             break;
                                     }
                                     
-                                    // Early exit if both found
-                                    if (foundFooter && foundFooterHighlight) {
+                                    // Early exit if everything we look for has been found
+                                    if (foundFooter && foundFooterHighlight && foundFooterColor && foundTextColor) {
                                         break;
                                     }
                                 }
@@ -4849,6 +4896,10 @@ bool drawCommandsMenu(
                                 return false;
                             });
                         }
+                        if (!commandTextColor.empty() && commandTextColor != DEFAULT_STR)
+                            listItem->setTextColor(getRawColor(commandTextColor, tsl::defaultTextColor));
+                        if (!commandFooterColor.empty() && commandFooterColor != DEFAULT_STR)
+                            listItem->setValueColor(getRawColor(commandFooterColor, tsl::onTextColor));
                         onlyTables = false;
                         list->addItem(listItem);
                         
@@ -4997,6 +5048,11 @@ bool drawCommandsMenu(
                                     commandFooterHighlightDefined = true;
                                     continue;
                                 }
+                                if (commandName.compare(0, FOOTER_COLOR_PATTERN_LEN, FOOTER_COLOR_PATTERN) == 0) {
+                                    commandFooterColor = commandName.substr(FOOTER_COLOR_PATTERN_LEN);
+                                    removeQuotes(commandFooterColor);
+                                    continue;
+                                }
                                 if (commandName.compare(0, FOOTER_PATTERN_LEN, FOOTER_PATTERN) == 0) {
                                     commandFooter = commandName.substr(FOOTER_PATTERN_LEN);
                                     // If there are additional arguments, append them (handles spaces in footer)
@@ -5032,6 +5088,11 @@ bool drawCommandsMenu(
                                     toggleStateConditionSet = true;
                                     continue;
                                 }
+                                if (commandName.compare(0, TEXT_COLOR_PATTERN_LEN, TEXT_COLOR_PATTERN) == 0) {
+                                    commandTextColor = commandName.substr(TEXT_COLOR_PATTERN_LEN);
+                                    removeQuotes(commandTextColor);
+                                    continue;
+                                }
                                 break;
                                 
                             case 'b':
@@ -5042,6 +5103,12 @@ bool drawCommandsMenu(
                                     hideTableBackground = !bg;
                                     continue;
                                 }
+                                if (commandName.compare(0, BG_COLOR_PATTERN_LEN, BG_COLOR_PATTERN) == 0) {
+                                    tableBgColor = commandName.substr(BG_COLOR_PATTERN_LEN);
+                                    removeQuotes(tableBgColor);
+                                    continue;
+                                }
+                                if (parseBoolFlag(commandName, BORDER_PATTERN, tableDrawBorder)) continue;
                                 break;
                                 
                             case 'e':
@@ -5275,7 +5342,7 @@ bool drawCommandsMenu(
                     }
 
                     addTable(list, tableData, packagePath, tableColumnOffset, tableStartGap, tableEndGap, tableSpacing,
-                        tableSectionTextColor, tableInfoTextColor, tableInfoTextColor, tableAlignment, hideTableBackground, useHeaderIndent, isPolling, isScrollableTable, tableWrappingMode, useWrappingIndent);
+                        tableSectionTextColor, tableInfoTextColor, tableInfoTextColor, tableAlignment, hideTableBackground, useHeaderIndent, isPolling, isScrollableTable, tableWrappingMode, useWrappingIndent, tableBgColor, tableDrawBorder);
                     tableData.clear();
 
                     if (usingBottomPivot) {
@@ -5498,6 +5565,18 @@ bool drawCommandsMenu(
 
                     continue;
                 }
+
+                // Applies ;text_color= / ;footer_color= (rgb888 hex) to any ListItem-derived
+                // element, if those directives were set for this item. No-ops otherwise,
+                // leaving default/theme colors untouched.
+                const auto applyItemColors = [&](tsl::elm::ListItem* itm) {
+                    if (!itm) return;
+                    if (!commandTextColor.empty() && commandTextColor != DEFAULT_STR)
+                        itm->setTextColor(getRawColor(commandTextColor, tsl::defaultTextColor));
+                    if (!commandFooterColor.empty() && commandFooterColor != DEFAULT_STR)
+                        itm->setValueColor(getRawColor(commandFooterColor, tsl::onTextColor));
+                };
+
                 if (useSelection) { // For wildcard commands (dropdown menus)
                     tsl::elm::ListItem* listItem;
                     if ((footer == DROPDOWN_SYMBOL) || (footer.empty()) || footer == commandFooter) {
@@ -5668,6 +5747,7 @@ bool drawCommandsMenu(
                     }
                     onlyTables = false;
                     
+                    applyItemColors(listItem);
                     list->addItem(listItem);
                 } else { // For everything else
                     
@@ -5758,6 +5838,7 @@ bool drawCommandsMenu(
                         });
                         
                         onlyTables = false;
+                        applyItemColors(listItem);
                         list->addItem(listItem);
 
                     } else if (commandMode == TOGGLE_STR) {
@@ -5859,6 +5940,7 @@ bool drawCommandsMenu(
 
 
                         onlyTables = false;
+                        applyItemColors(toggleListItem);
                         list->addItem(toggleListItem);
                     }
                 }
@@ -6749,9 +6831,9 @@ public:
                     displayVersion = getFirstLongEntry(overlayVersion);
                     if (cleanVersionLabels) displayVersion = cleanVersionLabel(displayVersion);
                     listItem->setValue(displayVersion, true);
-                    listItem->setValueColor(usingLibUltrahand ? (useLibultrahandVersions ? tsl::ultOverlayVersionTextColor : tsl::overlayVersionTextColor) : tsl::overlayVersionTextColor);
+                    listItem->setBaseValueColor(usingLibUltrahand ? (useLibultrahandVersions ? tsl::ultOverlayVersionTextColor : tsl::overlayVersionTextColor) : tsl::overlayVersionTextColor);
                 }
-                listItem->setTextColor(requiresAMS110Handling ? tsl::warningTextColor : usingLibUltrahand ? (useLibultrahandTitles ? tsl::ultOverlayTextColor : tsl::overlayTextColor) : tsl::overlayTextColor);
+                listItem->setBaseTextColor(requiresAMS110Handling ? tsl::warningTextColor : usingLibUltrahand ? (useLibultrahandTitles ? tsl::ultOverlayTextColor : tsl::overlayTextColor) : tsl::overlayTextColor);
                 
                 if (overlayFileName == lastOverlayFilename) {
                     lastOverlayFilename = "";
@@ -7087,9 +7169,9 @@ public:
                     displayVersion.reserve(64);
                     displayVersion = cleanVersionLabels ? cleanVersionLabel(packageVersion) : packageVersion;
                     listItem->setValue(displayVersion, true);
-                    listItem->setValueColor(usePackageVersions ? tsl::ultPackageVersionTextColor : tsl::packageVersionTextColor);
+                    listItem->setBaseValueColor(usePackageVersions ? tsl::ultPackageVersionTextColor : tsl::packageVersionTextColor);
                 }
-                listItem->setTextColor(usePackageTitles ? tsl::ultPackageTextColor : tsl::packageTextColor);
+                listItem->setBaseTextColor(usePackageTitles ? tsl::ultPackageTextColor : tsl::packageTextColor);
                 listItem->disableClickAnimation();
 
                 // Combo return: position the cursor on the package the user was browsing.
@@ -7509,6 +7591,8 @@ public:
                 inMainMenu.store(false, std::memory_order_release);
                 skipJumpReset.store(false, std::memory_order_release);
                 lastMenu = "hiddenMenuMode";
+                reloadMenu = false;
+                reloadMenu2 = false;
                 tsl::changeTo<UltrahandSettingsMenu>();
                 triggerSettingsFeedback();
                 return true;
@@ -7518,13 +7602,19 @@ public:
         if (freshSpawn && !(keysDown & KEY_B))
             freshSpawn = false;
         
-        if (returningToMain && !(keysDown & KEY_B)) {
-            returningToMain = false;
-            inMainMenu.store(true, std::memory_order_release);
+        if (returningToMain) {
+            if (!(keysDown & KEY_B)) {
+                returningToMain = false;
+                inMainMenu.store(true, std::memory_order_release);
+            }
+            return true; // consume all input (including B) while transition is pending
         }
-        if (returningToHiddenMain && !(keysDown & KEY_B)) {
-            returningToHiddenMain = false;
-            inHiddenMode.store(true, std::memory_order_release);
+        if (returningToHiddenMain) {
+            if (!(keysDown & KEY_B)) {
+                returningToHiddenMain = false;
+                inHiddenMode.store(true, std::memory_order_release);
+            }
+            return true; // consume all input (including B) while transition is pending
         }
     
         handleTriggerExit();
@@ -7576,7 +7666,7 @@ void initializeSettingsAndDirectories() {
     };
 
     // Shared keys (variables set by parseOverlaySettings — INI write-back only)
-    ensureDefault("dynamic_logo",             TRUE_STR);
+    ensureDefault("dynamic_logo",             FALSE_STR);
     ensureDefault("switch_2_style",            TRUE_STR);
     ensureDefault("dynamic_tables",            TRUE_STR);
     ensureDefault("selection_bg",             TRUE_STR);
@@ -7626,6 +7716,7 @@ void initializeSettingsAndDirectories() {
     setDefaultValue("libultrahand_versions",  TRUE_STR,  useLibultrahandVersions);
     setDefaultValue("package_titles",         FALSE_STR, usePackageTitles);
     setDefaultValue("package_versions",       TRUE_STR,  usePackageVersions);
+    setDefaultValue("in_package_titles",      TRUE_STR,  useInPackageTitles);
     setDefaultValue("page_swap",              FALSE_STR, usePageSwap);        // also set by parseOverlaySettings
     //setDefaultValue("page_recall",            TRUE_STR,  usePageRecall);
     //setDefaultValue("launch_recall",          TRUE_STR,  useLaunchRecall);
