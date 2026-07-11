@@ -1726,7 +1726,7 @@ void addPackageInfo(tsl::elm::List* list, auto& packageHeader, std::string type 
     addField(_TITLE,        packageHeader.title,                  "none");
     addField(_VERSION,      packageHeader.version,                "none");
     addField(creatorHeader, packageHeader.creator,                WORD_STR);
-    addField(_ABOUT,        getTranslated(packageHeader.about),   defaultLang == "en" ? WORD_STR : CHAR_STR);
+    addField(_ABOUT,        getTranslated(packageHeader.about),   AUTO_STR);
     addField(_CREDITS,      getTranslated(packageHeader.credits), WORD_STR);
     std::vector<std::vector<std::string>> dummyTableData;
     drawTable(list, dummyTableData, sectionLines, infoLines, xOffset, 20, 9+2, 3, DEFAULT_STR, DEFAULT_STR, DEFAULT_STR, LEFT_STR, false, false, true);
@@ -3051,7 +3051,16 @@ bool replacePlaceholdersRecursively(
 
 std::unordered_map<std::string, std::string> generalPlaceholders;
 void updateGeneralPlaceholders() {
+    // {ovl_language}: the currently selected overlay language code
+    // ("en", "es", "ja", "zh-cn", ...).  Read fresh from config.ini on every
+    // update so a language change is reflected the next time placeholders are
+    // resolved (this function runs before each placeholder pass).
+    std::string ovlLanguage = parseValueFromIniSection(
+        ULTRAHAND_CONFIG_INI_PATH, ULTRAHAND_PROJECT_NAME, DEFAULT_LANG_STR);
+    if (ovlLanguage.empty()) ovlLanguage = "en";
+
     generalPlaceholders = {
+        {"{ovl_language}", ovlLanguage},
         {"{ram_vendor}", memoryVendor},
         {"{ram_model}", memoryModel},
         {"{ram_size_gb}", is8GBEnabled ? "8" : "4"},
