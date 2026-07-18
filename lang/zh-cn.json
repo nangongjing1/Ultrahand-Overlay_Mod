@@ -96,7 +96,7 @@
     "VENDOR": "供应商",
     "MODEL": "型号",
     "STORAGE": "存储信息",
-    "INCOMPATIBLE_WARNING": "与 AMS v1.10+ 不兼容",
+    "INCOMPATIBLE_WARNING": "插件已过时",
     "OVERLAY_DOES_NOT_EXIST": "插件不存在！",
     "SYSTEM_RAM": "可用内存",
     "FREE": "空闲",

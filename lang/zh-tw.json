@@ -96,7 +96,7 @@
     "VENDOR": "供應商",
     "MODEL": "型號",
     "STORAGE": "儲存資訊",
-    "INCOMPATIBLE_WARNING": "與 AMS v1.10+ 不相容",
+    "INCOMPATIBLE_WARNING": "已過時的外掛程式",
     "OVERLAY_DOES_NOT_EXIST": "外掛不存在！",
     "SYSTEM_RAM": "可用記憶體",
     "FREE": "空閒",

@@ -57,7 +57,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 APP_TITLE	:= Ultrahand
 APP_AUTHOR	:= ppkantorski
-APP_VERSION	:= 2.5.2
+APP_VERSION	:= 2.5.3
 TARGET		:= ovlmenu
 BUILD		:= build
 SOURCES		:= source common
@@ -111,7 +111,7 @@ LDFLAGS += -Wl,-wrap,__cxa_throw \
 #---------------------------------------------------------------------------------
 
 
-CXXFLAGS := $(CFLAGS) -std=c++26 -Wno-dangling-else -ffast-math -fno-unwind-tables -fno-asynchronous-unwind-tables 
+CXXFLAGS := $(CFLAGS) -std=c++23 -Wno-dangling-else -ffast-math -fno-finite-math-only -fno-unwind-tables -fno-asynchronous-unwind-tables 
 
 ASFLAGS := $(ARCH)
 LDFLAGS += -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,-Map,$(notdir $*.map)

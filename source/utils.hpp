@@ -38,6 +38,12 @@ static std::atomic<bool> triggerExit(false);
 
 std::atomic<bool> exitingUltrahand{false};
 std::atomic<bool> isDownloadCommand{false};
+// Set (once, right where "open" actually queues its launch — never on a failed/no-op
+// "open") by the "open" command handler below. Consumed and reset in main.cpp's
+// handleInterpreterCompletion() to show LAUNCH_SYMBOL instead of CHECKMARK_SYMBOL on the
+// list item, since the usual "this finished, here's your checkmark" feedback is misleading
+// for a command that's actually about to hand off to another overlay.
+std::atomic<bool> lastCommandLaunchesOverlay{false};
 std::atomic<bool> commandSuccess{false};
 inline void setCommandFailed();
 inline void setCommandResult(bool result);
@@ -1034,15 +1040,15 @@ std::tuple<Result, std::string, std::string, bool, bool> getOverlayInfo(const st
     fclose(file);
 
     // --- Extract strings ---
-    const char* nameEnd = static_cast<const char*>(std::memchr(nacp.lang[0].name, '\0', sizeof(nacp.lang[0].name)));
-    const size_t nameLen = nameEnd ? (nameEnd - nacp.lang[0].name) : sizeof(nacp.lang[0].name);
+    const char* nameEnd = static_cast<const char*>(std::memchr(nacp.lang_data.lang[0].name, '\0', sizeof(nacp.lang_data.lang[0].name)));
+    const size_t nameLen = nameEnd ? (nameEnd - nacp.lang_data.lang[0].name) : sizeof(nacp.lang_data.lang[0].name);
     
     const char* versionEnd = static_cast<const char*>(std::memchr(nacp.display_version, '\0', sizeof(nacp.display_version)));
     const size_t versionLen = versionEnd ? (versionEnd - nacp.display_version) : sizeof(nacp.display_version);
 
     return {
         ResultSuccess,
-        std::string(nacp.lang[0].name, nameLen),
+        std::string(nacp.lang_data.lang[0].name, nameLen),
         std::string(nacp.display_version, versionLen),
         usingLibUltrahand,
         usesNewLibNX
@@ -2246,6 +2252,8 @@ void applyReplaceIniPlaceholder(std::string& arg, const std::string& commandName
  *
  * Optimized version with variables moved to usage scope to avoid repeated allocations.
  * Supports "null" key as a fallback default for failed lookups.
+ * Array path segments accept numeric indices or field=value matches (case-sensitive;
+ * first match wins), e.g. {json_file(0,assets,name=Test.nro,browser_download_url)}.
  *
  * @param arg The input string containing the placeholder.
  * @param commandName The name of the JSON command (e.g., "json", "json_file").
@@ -2312,8 +2320,30 @@ std::string replaceJsonPlaceholder(const std::string& arg, const std::string& co
             if (cJSON_IsObject(value)) {
                 value = cJSON_GetObjectItemCaseSensitive(value, key.c_str()); // Navigate through object
             } else if (cJSON_IsArray(value)) {
-                index = std::stoul(key); // Convert key to index for arrays
-                value = cJSON_GetArrayItem(value, index);
+                // Array path: numeric index (e.g. 12) or field=value match (e.g. name=Test.nro).
+                // Dots in match values are literal (not nested keys). First case-sensitive match wins.
+                const size_t eqPos = key.find('=');
+                if (eqPos != std::string::npos && eqPos > 0) {
+                    const std::string field(key, 0, eqPos);
+                    cJSON* found = nullptr;
+                    const int arraySize = cJSON_GetArraySize(value);
+                    for (int i = 0; i < arraySize; ++i) {
+                        cJSON* item = cJSON_GetArrayItem(value, i);
+                        if (!cJSON_IsObject(item)) {
+                            continue;
+                        }
+                        cJSON* fieldItem = cJSON_GetObjectItemCaseSensitive(item, field.c_str());
+                        if (cJSON_IsString(fieldItem) && fieldItem->valuestring &&
+                            key.compare(eqPos + 1, std::string::npos, fieldItem->valuestring) == 0) {
+                            found = item;
+                            break;
+                        }
+                    }
+                    value = found; // nullptr on no match → same fallback as a bad index
+                } else {
+                    index = std::stoul(key); // Convert key to index for arrays
+                    value = cJSON_GetArrayItem(value, index);
+                }
             } else {
                 validValue = false; // Set validValue to false if value is neither object nor array
             }
@@ -5203,6 +5233,16 @@ void processCommand(const std::vector<std::string>& cmd, const std::string& pack
                         }
                     }
                     
+                    // Snapshot the current package-menu position (if any) so returning from
+                    // this overlay with a plain back-out can restore it exactly. No-op if we
+                    // aren't inside an interactive package menu (e.g. boot_package/exit_package).
+                    if (ult::openCommandInvokedCallback)
+                        ult::openCommandInvokedCallback();
+
+                    // Past the isFile() failure return above, so this only ever fires for an
+                    // "open" that's actually about to launch something.
+                    lastCommandLaunchesOverlay.store(true, std::memory_order_release);
+
                     {
                         std::lock_guard<std::mutex> lock(ult::overlayLaunchMutex);
                         ult::requestedOverlayPath = overlayPath;
